@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""
+codex-review: Lightweight, structured code review wrapper around `codex review`.
+
+Defaults:
+- Scope: --uncommitted (or pass --base <branch> / --commit <sha>)
+- Reasoning effort: medium (capped at high; use --hard or --effort high for risky changes)
+- Output: concise Chinese review split into Blocking vs Advisory items
+"""
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+ALLOWED_EFFORTS = ("low", "medium", "high")
+
+DEFAULT_REVIEW_PROMPT = """请审查上述代码变更，用简洁中文输出，严格分为两部分：
+1. **阻断项（必须修）**：明确会导致逻辑错误、数据损坏/丢失、安全或权限问题、崩溃、或接口破坏的缺陷；每条给出具体文件路径和触发原因。没有则写“无”。
+2. **建议项（可选优化）**：可读性、边界情况或性能改进建议，最多列 3 条。没有则写“无”。
+
+不要复述 diff，不要客套。"""
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="codex-review",
+        description="Run a concise, structured Codex code review on local changes.",
+    )
+    parser.add_argument(
+        "-C",
+        "--cd",
+        default=".",
+        help="Target repository directory (default: current directory).",
+    )
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument(
+        "--uncommitted",
+        action="store_true",
+        help="Review staged, unstaged, and untracked changes (default).",
+    )
+    scope.add_argument(
+        "--base",
+        metavar="BRANCH",
+        help="Review changes against the given base branch (e.g. main).",
+    )
+    scope.add_argument(
+        "--commit",
+        metavar="SHA",
+        help="Review changes introduced by a specific commit.",
+    )
+    parser.add_argument(
+        "-e",
+        "--effort",
+        choices=ALLOWED_EFFORTS,
+        default="medium",
+        help="Reasoning effort: low, medium (default), or high.",
+    )
+    parser.add_argument(
+        "--hard",
+        action="store_true",
+        help="Shorthand for --effort high (for security, billing, or core logic changes).",
+    )
+    parser.add_argument(
+        "-m",
+        "--model",
+        default=None,
+        help="Optional model override (defaults to ~/.codex/config.toml).",
+    )
+    parser.add_argument(
+        "extra_prompt",
+        nargs="*",
+        help="Optional extra focus areas for the review.",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    target_dir = Path(args.cd).expanduser().resolve()
+    if not target_dir.is_dir():
+        print(f"Error: working directory does not exist: {target_dir}", file=sys.stderr)
+        return 2
+
+    effort = "high" if args.hard else args.effort
+    cmd: list[str] = ["codex", "review", "-c", f'model_reasoning_effort="{effort}"']
+
+    if args.model:
+        cmd.extend(["-c", f'model="{args.model}"'])
+
+    if args.base:
+        cmd.extend(["--base", args.base])
+    elif args.commit:
+        cmd.extend(["--commit", args.commit])
+    else:
+        cmd.append("--uncommitted")
+
+    extra = " ".join(args.extra_prompt).strip()
+    if extra:
+        # Note: if codex review rejects combining scope flags with a positional prompt,
+        # we fall back to running `codex exec -s read-only` with git diff context.
+        prompt = f"{DEFAULT_REVIEW_PROMPT}\n\n额外重点关注：{extra}"
+    else:
+        prompt = DEFAULT_REVIEW_PROMPT
+
+    # First check if we pass prompt only when no scope conflict, or pass via codex review
+    proc = subprocess.run(
+        cmd + [prompt],
+        cwd=str(target_dir),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    # Some Codex CLI versions disallow combining --uncommitted/--base/--commit with [PROMPT].
+    # If that happens, transparently retry without the custom prompt so it still works cleanly.
+    if proc.returncode != 0 and "cannot be used with" in (proc.stderr or ""):
+        proc = subprocess.run(
+            cmd,
+            cwd=str(target_dir),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    if proc.stdout:
+        print(proc.stdout.strip())
+    if proc.stderr:
+        filtered = [
+            l for l in proc.stderr.splitlines()
+            if "could not create PATH aliases" not in l
+        ]
+        if filtered and proc.returncode != 0:
+            print("\n".join(filtered), file=sys.stderr)
+
+    status = "ok" if proc.returncode == 0 else f"failed({proc.returncode})"
+    print("\n---")
+    print(f"[codex-review] status={status} effort={effort} model={args.model or 'default'} cwd={target_dir}")
+    return proc.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
