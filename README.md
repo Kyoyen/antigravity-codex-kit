@@ -1,48 +1,40 @@
-# Antigravity × Codex 轻量协作工具箱
+# antigravity-codex-kit
 
-> **核心思路：反重力（Antigravity）当总管陪你发散聊方案、定方向、做验收；本机 Codex 当“代码小员工”和严格审稿人。**
+轻量级本地多 Agent 协作工具箱：使用 **Antigravity** 负责需求讨论、方案规划与结果验收，将具体的编码、重构与代码审查任务委托给本机 **Codex CLI** 执行。
 
-不用搭重型框架、不用折腾复杂 MCP，只用两个零第三方依赖的 Python 脚本 + 一份轻量 Skill，把 Antigravity 的沟通规划体验和 Codex 的代码执行能力串成一个顺手的本地工作流。
+无需配置额外的 MCP 服务或第三方依赖，仅包含两个基于 Python 标准库的 CLI 封装脚本与一份 Antigravity Skill。
 
----
+## 设计特点
 
-## 为什么这么做？
-
-- **各干各最擅长的事**：在 Antigravity 里聊想法、拆方案、看人话汇报；具体写模块、大重构、修棘手 Bug 和做 Code Review 派给本机 Codex 干，不用自己直面 GPT 的冗长技术细节。
-- **不裸调 `codex exec`，安全可控**：
-  - 默认 `workspace-write` 沙箱（不会裸奔 `danger-full-access`），支持 `--read-only` 只读分析。
-  - 思考强度默认 `medium`，难活加 `--hard` 切到 `high`（脚本层封顶 `high`，省额度不乱飙）。
-  - 模型默认沿用你 `~/.codex/config.toml` 配置，也可按任务 `-m` 临时指定。
-- **原生接入 Codex 桌面端**：默认走 `codex app-server --stdio` 官方协议发起会话，每笔派活都准确绑定对应项目目录，且原生以 `vscode` 来源落库——重开 Codex 桌面客户端就能在对应项目下看到历史会话，随时可点开或接管。
-- **智能续聊 & 灵活不死板**：每次派活自动输出 `session_id`；同一功能的返工/追改用 `--resume <id>` 留在原会话，独立新任务则开新会话，由反重力自行判断。
-
----
+- **职责分离**：在 Antigravity 中完成需求对齐、架构讨论和最终验收；将边界清晰的实现、重构、问题排查和 Code Review 交给本机 Codex 执行。
+- **可控的默认边界**：
+  - `codex-worker` 默认使用 `workspace-write` 沙箱，支持 `--read-only` 只读模式和 `--worktree` Git 隔离模式。
+  - 推理强度默认 `medium`，复杂任务可通过 `--hard` 切换至 `high`（脚本层限制上限为 `high`）。
+  - 模型默认继承 `~/.codex/config.toml`，也支持通过 `-m` 按任务覆盖。
+- **兼容 Codex 桌面客户端**：`codex-worker` 默认通过 `codex app-server --stdio` 协议发起与恢复会话，会话会绑定到对应的项目目录并以 `vscode` 来源记录，可在 Codex 桌面客户端中查看历史记录。
+- **灵活的会话管理**：每次执行自动输出 `session_id`；同一任务的连续修改可通过 `--resume <session_id>` 延续上下文，独立任务则开启新会话。
 
 ## 目录结构
 
 ```text
 .
 ├── bin/
-│   ├── codex-worker                     # 派活写代码（默认 app-server 通道，--worktree 时走 codex exec）
-│   └── codex-review                     # 合并前质检（输出简洁中文「阻断项 / 建议项」）
+│   ├── codex-worker                     # 封装 Codex 任务执行（默认 app-server，--worktree 时回退 codex exec）
+│   └── codex-review                     # 封装 Codex 代码审查，输出「阻断项 / 建议项」结构化结论
 ├── .agents/skills/codex-delegate/
-│   └── SKILL.md                         # 轻量 Antigravity Skill，教反重力怎么派活与验收
-├── AGENTS.md                            # 反重力与 Codex 共用的项目规范示例
-└── install.sh                           # 一键软链到 ~/.local/bin 和 ~/.gemini/config/skills
+│   └── SKILL.md                         # Antigravity Skill，定义任务委托与验收流程
+├── AGENTS.md                            # Antigravity 与 Codex 共用的项目约定
+└── install.sh                           # 将命令与 Skill 软链至全局目录
 ```
 
----
+## 环境要求
 
-## 前置条件
+- [Antigravity](https://antigravity.google/)
+- 本机已安装并登录 [Codex CLI](https://github.com/openai/codex)（基于 `codex-cli 0.169.0` 验证）
+- Python 3（标准库，无额外依赖）
+- `~/.local/bin` 已加入 `PATH`
 
-1. 已安装 [Antigravity](https://antigravity.google/)
-2. 本机已安装并登录 [Codex CLI](https://github.com/openai/codex)（实测基于 `codex-cli 0.169.0`）
-3. Python 3（macOS 自带即可，无任何第三方依赖）
-4. `~/.local/bin` 在你的 `PATH` 中（如未配置，在 `~/.zshrc` 里加一句 `export PATH="$HOME/.local/bin:$PATH"`）
-
----
-
-## 一键安装
+## 安装
 
 ```bash
 git clone https://github.com/Zoeoetheroad/antigravity-codex-kit.git
@@ -50,50 +42,50 @@ cd antigravity-codex-kit
 ./install.sh
 ```
 
-`install.sh` 会做两件事（都是软链，改仓库文件立即生效）：
-- 把 `codex-worker` 和 `codex-review` 软链到 `~/.local/bin/`
-- 把 `codex-delegate` Skill 软链到 `~/.gemini/config/skills/`，以后你在**任何项目**打开 Antigravity 都会自动识别
+`install.sh` 会创建以下软链接（修改本仓库文件即可直接生效）：
 
----
+- `~/.local/bin/codex-worker` → `bin/codex-worker`
+- `~/.local/bin/codex-review` → `bin/codex-review`
+- `~/.gemini/config/skills/codex-delegate` → `.agents/skills/codex-delegate`
 
-## 日常怎么用
+安装完成后，在任意项目中打开 Antigravity 均可自动识别 `codex-delegate` Skill。
 
-### 1. 在 Antigravity 里直接说人话
-聊完方案后，直接跟反重力说：
-- “方案定了，交给 Codex 去实现吧”
-- “让小员工顺手把这块重构一下”
-- “跑一下 Codex Review 看看有没有坑”
+## 使用方式
 
-Antigravity 会自动写好任务目标、约束和验收标准，调 `codex-worker` 派活，干完后帮你看 diff、跑验证，再用简洁中文向你汇报。
+### 在 Antigravity 中调用
 
-> 首次在 Antigravity 里运行 `codex-worker` / `codex-review` 时，因为需要联网及读取 `~/.codex` 登录态，放行一次命令即可。
+确认方案后，可直接指示 Antigravity 将具体开发或审查任务交由 Codex 执行，例如：
 
-### 2. 也可以在终端直接调用
+- “按这个方案交给 Codex 实现。”
+- “让 Codex 重构这部分逻辑并补充测试。”
+- “用 Codex 对当前改动做一次 Code Review。”
+
+> 首次在 Antigravity 中执行 `codex-worker` / `codex-review` 时，由于需要访问网络及 `~/.codex` 凭证，需允许该命令执行。
+
+### 命令行直接调用
 
 ```bash
 # 常规任务（默认 medium，workspace-write 沙箱）
-codex-worker -C /path/to/repo "实现 xxx 功能并补单元测试"
+codex-worker -C /path/to/repo "实现 xxx 功能并补充单元测试"
 
-# 较难任务（切到 high，封顶 high）
-codex-worker --hard -C /path/to/repo "排查并修复 xxx 并发竞争问题"
+# 复杂任务（切换至 high，上限 high）
+codex-worker --hard -C /path/to/repo "排查并修复 xxx 并发问题"
 
-# 只读分析，不改代码
-codex-worker --read-only -C /path/to/repo "梳理登录鉴权流程并指出潜在边界问题"
+# 只读分析（不修改文件）
+codex-worker --read-only -C /path/to/repo "梳理鉴权流程并列出潜在边界问题"
 
-# 在独立 Git worktree 里隔离开发
-codex-worker --worktree -C /path/to/repo "实验性重构 xxx 模块"
+# 在独立 Git worktree 中执行
+codex-worker --worktree -C /path/to/repo "重构 xxx 模块"
 
-# 续聊返工（用上次末尾打印的 session_id，或传 last 续最近一次）
-codex-worker --resume <session_id> -C /path/to/repo "把错误提示改成中文"
+# 延续已有会话（传入 session_id，或使用 last 延续当前目录最近一次会话）
+codex-worker --resume <session_id> -C /path/to/repo "补充异常处理逻辑"
 
-# 代码审查（默认审未提交改动，也支持 --base main / --commit <sha>）
+# 代码审查（默认审查未提交改动，也支持 --base <branch> / --commit <sha>）
 codex-review -C /path/to/repo
 codex-review --hard --base main -C /path/to/repo
 ```
 
----
+## 说明
 
-## 小贴士
-
-- **在 Codex 桌面客户端看历史会话**：由于 Codex 桌面客户端不会热监听外部写入，平时在 Antigravity 点开命令卡片看汇报即可；想在 Codex 客户端侧边栏看到新增的派活列表时，退出重开一下 Codex 客户端就会全部同步出来。
-- **在终端接管某次会话**：随时可运行 `codex resume <session_id>` 进交互界面查看每一步细节或亲自继续聊。
+- **在 Codex 桌面客户端中查看会话**：Codex 桌面客户端不会实时热刷新外部写入的会话记录；如需在客户端侧边栏查看新增会话，重启客户端即可同步。
+- **在终端接管会话**：可通过 `codex resume <session_id>` 在终端交互界面中查看完整过程或继续对话。
