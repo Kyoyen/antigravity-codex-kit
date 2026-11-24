@@ -21,6 +21,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
+from codex_runtime import report_config_error, report_launch_error, resolve_codex
+
 ALLOWED_EFFORTS = ("low", "medium", "high")
 
 
@@ -118,6 +120,7 @@ def print_footer(status: str, effort: str, sandbox: str, model: Optional[str], t
 
 
 def run_via_app_server(
+    codex_bin: str,
     target_dir: Path,
     effort: str,
     sandbox: str,
@@ -127,15 +130,19 @@ def run_via_app_server(
     raw: bool,
 ) -> int:
     """Run via `codex app-server --stdio` so threads appear in Codex Desktop App."""
-    proc = subprocess.Popen(
-        ["codex", "app-server", "--stdio"],
-        cwd=str(target_dir),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
+    try:
+        proc = subprocess.Popen(
+            [codex_bin, "app-server", "--stdio"],
+            cwd=str(target_dir),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+    except OSError as exc:
+        report_launch_error(codex_bin, exc)
+        return 2
 
     assert proc.stdin is not None
     assert proc.stdout is not None
@@ -301,10 +308,13 @@ def run_via_app_server(
         status = "ok" if exit_code == 0 else f"failed({turn_status})"
         print_footer(status, effort, sandbox, model, target_dir, thread_id)
 
+    if exit_code != 0:
+        report_config_error(codex_bin, stderr_output, *errors)
     return exit_code
 
 
 def run_via_exec(
+    codex_bin: str,
     target_dir: Path,
     effort: str,
     sandbox: str,
@@ -324,7 +334,7 @@ def run_via_exec(
         last_msg_path = Path(tmp.name)
 
     try:
-        cmd: list[str] = ["codex", "exec"]
+        cmd: list[str] = [codex_bin, "exec"]
 
         if resume_id:
             cmd.append("resume")
@@ -355,14 +365,18 @@ def run_via_exec(
             cmd.extend(["--json", "-o", str(last_msg_path)])
             cmd.append(prompt)
 
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(target_dir),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(target_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+        except OSError as exc:
+            report_launch_error(codex_bin, exc)
+            return 2
 
         session_id = resume_id if (resume_id and resume_id.lower() != "last") else None
         agent_messages: list[str] = []
@@ -427,6 +441,8 @@ def run_via_exec(
             status = "ok" if exit_code == 0 else f"failed({exit_code})"
             print_footer(status, effort, sandbox, model, target_dir, session_id)
 
+        if exit_code != 0:
+            report_config_error(codex_bin, stderr_output, *errors)
         return exit_code
     finally:
         try:
@@ -447,11 +463,16 @@ def main() -> int:
         print(f"Error: working directory does not exist: {target_dir}", file=sys.stderr)
         return 2
 
+    codex_bin = resolve_codex(target_dir)
+    if codex_bin is None:
+        return 2
+
     effort = "high" if args.hard else args.effort
     sandbox = "read-only" if args.read_only else "workspace-write"
 
     if args.worktree:
         return run_via_exec(
+            codex_bin=codex_bin,
             target_dir=target_dir,
             effort=effort,
             sandbox=sandbox,
@@ -463,6 +484,7 @@ def main() -> int:
         )
 
     return run_via_app_server(
+        codex_bin=codex_bin,
         target_dir=target_dir,
         effort=effort,
         sandbox=sandbox,

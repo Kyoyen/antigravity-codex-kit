@@ -89,3 +89,4 @@ codex-review --hard --base main -C /path/to/repo
 
 - **在 Codex 桌面客户端中查看会话**：Codex 桌面客户端不会实时热刷新外部写入的会话记录；如需在客户端侧边栏查看新增会话，重启客户端即可同步。
 - **在终端接管会话**：可通过 `codex resume <session_id>` 在终端交互界面中查看完整过程或继续对话。
+- **Codex 配置解析失败**：如果旧版 CLI 不识别当前配置（例如 `web_search = "indexed"`），报错会显示实际调用的 CLI 路径和可取得的版本。默认沿用 `PATH`；可用 `CODEX_BIN="/absolute/path/to/codex" codex-worker --read-only -C /path/to/project "只回复 OK"` 为单次调用指定兼容的可执行文件。工作树模式与 `codex-review` 同样接受 `CODEX_BIN`；显式指定无效路径时不会回退到 `PATH`。无需为此更改现有 Codex 配置。
