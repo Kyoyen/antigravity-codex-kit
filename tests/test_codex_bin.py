@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-STUB = """
+STUB = r"""
 import json, os, sys
 with open(os.environ["CALL_LOG"], "a") as f:
     print(json.dumps([sys.argv[0], *sys.argv[1:]]), file=f)
@@ -22,6 +22,10 @@ elif sys.argv[1] == "app-server":
         if name == "thread/start":
             assert request["params"]["sandbox"] == "read-only"
             assert request["params"]["cwd"] == os.getcwd()
+            if os.environ.get("NOISY_APP_SERVER"):
+                sys.stderr.buffer.write(b"debug line\n" * 110000)
+                sys.stderr.buffer.write(b"last stderr line\n")
+                sys.stderr.buffer.flush()
             if os.environ.get("FAIL_CONFIG"):
                 print(json.dumps({"id": 2, "error": {"message": "failed to load configuration: unknown variant indexed"}}), flush=True)
             else:
@@ -131,6 +135,20 @@ class CodexBinTest(unittest.TestCase):
                 self.assertIn(str(invalid), result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
                 self.assertFalse(self.log.exists())
+
+    def test_app_server_drains_noisy_stderr_before_thread_response(self):
+        self.env.update(CODEX_BIN=str(self.override), NOISY_APP_SERVER="1")
+        result = self.run_cli("codex-worker", "--read-only", "Reply OK")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("session_id=app-session", result.stdout)
+        self.assertEqual(result.stderr, "")
+
+        self.env["FAIL_CONFIG"] = "1"
+        result = self.run_cli("codex-worker", "--read-only", "Reply OK")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unknown variant indexed", result.stderr)
+        self.assertIn("last stderr line", result.stderr)
+        self.assertLess(len(result.stderr), 66 * 1024)
 
     def test_config_failure_reports_selected_executable_and_version(self):
         self.env.update(CODEX_BIN=str(self.override), FAIL_CONFIG="1")

@@ -21,7 +21,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
-from codex_runtime import report_config_error, report_launch_error, resolve_codex
+from codex_runtime import StderrTail, report_config_error, report_launch_error, resolve_codex
 
 ALLOWED_EFFORTS = ("low", "medium", "high")
 
@@ -146,6 +146,8 @@ def run_via_app_server(
 
     assert proc.stdin is not None
     assert proc.stdout is not None
+    assert proc.stderr is not None
+    stderr_tail = StderrTail(proc.stderr)
 
     def send(payload: dict[str, Any]) -> None:
         proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
@@ -287,8 +289,9 @@ def run_via_app_server(
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+            proc.wait()
 
-    stderr_output = proc.stderr.read() if proc.stderr else ""
+    stderr_output = stderr_tail.finish()
 
     if not raw:
         if agent_messages:

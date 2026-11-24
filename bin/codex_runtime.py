@@ -4,8 +4,9 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TextIO
 
 
 def resolve_codex(target_dir: Path) -> Optional[str]:
@@ -55,3 +56,32 @@ def report_config_error(codex_bin: str, *messages: str) -> None:
         "Use a CLI compatible with the current configuration via CODEX_BIN or PATH.",
         file=sys.stderr,
     )
+
+
+class StderrTail:
+    """Continuously drain a CLI pipe while keeping just the last 64 KiB."""
+
+    LIMIT = 64 * 1024
+
+    def __init__(self, stream: TextIO) -> None:
+        self._tail = bytearray()
+        self._lock = threading.Lock()
+        self._reader = threading.Thread(target=self._drain, args=(stream,), daemon=True)
+        self._reader.start()
+
+    def _drain(self, stream: TextIO) -> None:
+        with stream:
+            try:
+                while chunk := os.read(stream.fileno(), 8192):
+                    with self._lock:
+                        self._tail.extend(chunk)
+                        del self._tail[:-self.LIMIT]
+            except OSError:
+                pass
+
+    def finish(self) -> str:
+        # The caller has already reaped the child. A descendant retaining the
+        # pipe must not prevent returning diagnostics.
+        self._reader.join(timeout=2)
+        with self._lock:
+            return self._tail.decode("utf-8", errors="replace")
