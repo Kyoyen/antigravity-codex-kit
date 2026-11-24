@@ -89,3 +89,4 @@ codex-review --hard --base main -C /path/to/repo
 
 - **在 Codex 桌面客户端中查看会话**：Codex 桌面客户端不会实时热刷新外部写入的会话记录；如需在客户端侧边栏查看新增会话，重启客户端即可同步。
 - **在终端接管会话**：可通过 `codex resume <session_id>` 在终端交互界面中查看完整过程或继续对话。
+- **Codex 配置解析失败**：如果 `codex-worker` 报 `unknown variant`（例如旧版 CLI 不认 `web_search = "indexed"`），用 `command -v codex` 和 `codex --version` 确认 Antigravity 当前环境调用的是哪个版本。更新 Codex CLI，或仅为该次调用将已安装且兼容的 Codex CLI 所在目录前置到 `PATH`。无需为此修改现有 Codex 配置。
