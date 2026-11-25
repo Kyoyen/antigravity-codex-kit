@@ -25,6 +25,7 @@ from codex_runtime import (
     StderrTail,
     report_config_error,
     report_launch_error,
+    report_writer_lock_error,
     resolve_codex,
     resolve_reveal_mode,
     reveal_in_desktop_app,
@@ -100,14 +101,14 @@ def parse_args() -> argparse.Namespace:
         action="store_const",
         const=True,
         default=None,
-        help="Reveal the session in an already-running Codex Desktop app upon completion.",
+        help="Hand off and reveal the completed session in an already-running macOS Codex Desktop app (locks the thread in Desktop).",
     )
     reveal_group.add_argument(
         "--no-reveal",
         dest="reveal",
         action="store_const",
         const=False,
-        help="Do not automatically reveal the session in Codex Desktop.",
+        help="Do not reveal the session in Codex Desktop (default; keeps --resume unlocked).",
     )
     parser.add_argument(
         "prompt",
@@ -151,7 +152,7 @@ def run_via_app_server(
     resume_id: Optional[str],
     prompt: str,
     raw: bool,
-    reveal_mode: str = "auto",
+    reveal_mode: str = "never",
 ) -> int:
     """Run via `codex app-server --stdio` so threads appear in Codex Desktop App."""
     try:
@@ -340,6 +341,7 @@ def run_via_app_server(
 
     if exit_code != 0:
         report_config_error(codex_bin, stderr_output, *errors)
+        report_writer_lock_error(stderr_output, *errors)
     return exit_code
 
 
