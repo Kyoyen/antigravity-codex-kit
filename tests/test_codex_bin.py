@@ -297,6 +297,47 @@ class CodexBinTest(unittest.TestCase):
         self.assertIn("Codex Desktop", result.stderr)
         self.assertIn("--resume", result.stderr)
 
+    def test_reveal_only_validates_uuid_and_reveals_without_running_codex(self):
+        bad = self.run_cli("codex-worker", "--reveal-only", "not-a-uuid")
+        self.assertEqual(bad.returncode, 2)
+        self.assertIn("valid session UUID", bad.stderr)
+        self.assertFalse(self.log.exists())
+
+        if sys.platform == "darwin":
+            open_log = self.base / "reveal_only_open.jsonl"
+            fake_tools = self.base / "fake-reveal-only-tools"
+            fake_tools.mkdir()
+
+            lsappinfo = fake_tools / "lsappinfo"
+            lsappinfo.write_text(
+                "#!" + sys.executable + "\n"
+                "print('[ NULL ]  ASN:0x0-0x1:\\n    bundleID=\"com.openai.codex\"')\n"
+            )
+            lsappinfo.chmod(0o755)
+
+            fake_open = fake_tools / "open"
+            fake_open.write_text(
+                "#!" + sys.executable + "\n"
+                "import json, os, sys\n"
+                "with open(os.environ['OPEN_LOG'], 'a') as f:\n"
+                "    print(json.dumps(sys.argv[1:]), file=f)\n"
+            )
+            fake_open.chmod(0o755)
+
+            valid_uuid = "019a0000-0000-7000-8000-000000000009"
+            self.env.update(
+                OPEN_LOG=str(open_log),
+                PATH=str(fake_tools) + os.pathsep + self.env["PATH"],
+            )
+            ok = self.run_cli("codex-worker", "--reveal-only", valid_uuid)
+            self.assertEqual(ok.returncode, 0, ok.stderr)
+            self.assertIn(f"reveal=ok session_id={valid_uuid}", ok.stdout)
+            self.assertEqual(
+                [json.loads(l) for l in open_log.read_text().splitlines()],
+                [["-g", "-b", "com.openai.codex", f"codex://threads/{valid_uuid}"]],
+            )
+            self.assertFalse(self.log.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

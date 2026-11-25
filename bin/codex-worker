@@ -18,6 +18,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -109,6 +110,12 @@ def parse_args() -> argparse.Namespace:
         action="store_const",
         const=False,
         help="Do not reveal the session in Codex Desktop (default; keeps --resume unlocked).",
+    )
+    reveal_group.add_argument(
+        "--reveal-only",
+        metavar="SESSION_ID",
+        default=None,
+        help="Reveal an existing session in a background macOS Codex Desktop app without running a new turn.",
     )
     parser.add_argument(
         "prompt",
@@ -485,6 +492,17 @@ def run_via_exec(
 
 def main() -> int:
     args = parse_args()
+    if args.reveal_only:
+        try:
+            canonical_id = str(uuid.UUID(args.reveal_only))
+        except ValueError:
+            print(f"Error: --reveal-only requires a valid session UUID, got: {args.reveal_only}", file=sys.stderr)
+            return 2
+        revealed = reveal_in_desktop_app(canonical_id, "auto")
+        state = "ok" if revealed else "skipped"
+        print(f"[codex-worker] reveal={state} session_id={canonical_id}")
+        return 0
+
     prompt = read_prompt(args.prompt)
     if not prompt:
         print("Error: task prompt is required (pass as argument or via stdin).", file=sys.stderr)

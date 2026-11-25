@@ -80,6 +80,9 @@ codex-worker --worktree -C /path/to/repo "重构 xxx 模块"
 # 延续已有会话（传入 session_id，或使用 last 延续当前目录最近一次会话）
 codex-worker --resume <session_id> -C /path/to/repo "补充异常处理逻辑"
 
+# 整轮任务收尾后，在后台将已有会话刷出到 Codex 桌面端（不再起新对话）
+codex-worker --reveal-only <session_id>
+
 # 代码审查（默认审查未提交改动，也支持 --base <branch> / --commit <sha>）
 codex-review -C /path/to/repo
 codex-review --hard --base main -C /path/to/repo
