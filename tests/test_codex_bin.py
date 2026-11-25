@@ -64,6 +64,7 @@ class CodexBinTest(unittest.TestCase):
         self.env = os.environ.copy()
         self.env.pop("CODEX_BIN", None)
         self.env.pop("CODEX_WORKER_REVEAL", None)
+        self.env.pop("CODEX_WORKER_DEFAULT_DIR", None)
         self.env.update(
             PATH="relative-path" + os.pathsep + os.environ.get("PATH", os.defpath),
             CALL_LOG=str(self.log),
@@ -86,6 +87,12 @@ class CodexBinTest(unittest.TestCase):
         return subprocess.run(
             [str(self.commands / name), "-C", str(self.target), *args],
             env=self.env, capture_output=True, text=True, timeout=10,
+        )
+
+    def run_cli_in(self, name, cwd, *args):
+        return subprocess.run(
+            [str(self.commands / name), *args],
+            cwd=str(cwd), env=self.env, capture_output=True, text=True, timeout=10,
         )
 
     def calls(self):
@@ -337,6 +344,59 @@ class CodexBinTest(unittest.TestCase):
                 [["-g", "-b", "com.openai.codex", f"codex://threads/{valid_uuid}"]],
             )
             self.assertFalse(self.log.exists())
+
+    def test_default_dir_env_fallback_override_and_validation(self):
+        default_inbox = self.base / "default inbox"
+        default_inbox.mkdir()
+        explicit_repo = self.base / "explicit repo"
+        explicit_repo.mkdir()
+        self.env["CODEX_BIN"] = str(self.override)
+
+        # 1. No -C and no CODEX_WORKER_DEFAULT_DIR -> falls back to current directory (self.target).
+        res_cwd = self.run_cli_in("codex-worker", self.target, "--read-only", "Reply OK")
+        self.assertEqual(res_cwd.returncode, 0, res_cwd.stderr)
+        self.assertIn(f"cwd={self.target}", res_cwd.stdout)
+
+        # 2. CODEX_WORKER_DEFAULT_DIR applies when -C is omitted for codex-worker, not codex-review.
+        self.env["CODEX_WORKER_DEFAULT_DIR"] = str(default_inbox)
+        res_default = self.run_cli_in("codex-worker", explicit_repo, "--read-only", "Reply OK")
+        self.assertEqual(res_default.returncode, 0, res_default.stderr)
+        self.assertIn(f"cwd={default_inbox}", res_default.stdout)
+
+        res_review = self.run_cli_in("codex-review", self.target)
+        self.assertEqual(res_review.returncode, 0, res_review.stderr)
+        self.assertIn(f"cwd={self.target}", res_review.stdout)
+
+        # 3. Explicit -C (including -C .) always overrides CODEX_WORKER_DEFAULT_DIR.
+        res_explicit = self.run_cli_in("codex-worker", explicit_repo, "-C", ".", "--read-only", "Reply OK")
+        self.assertEqual(res_explicit.returncode, 0, res_explicit.stderr)
+        self.assertIn(f"cwd={explicit_repo}", res_explicit.stdout)
+
+        # 4. Blank CODEX_WORKER_DEFAULT_DIR acts as unset; nonexistent or file value fails fast.
+        self.env["CODEX_WORKER_DEFAULT_DIR"] = "   "
+        res_blank = self.run_cli_in("codex-worker", self.target, "--read-only", "Reply OK")
+        self.assertEqual(res_blank.returncode, 0, res_blank.stderr)
+        self.assertIn(f"cwd={self.target}", res_blank.stdout)
+
+        missing_dir = self.base / "missing inbox"
+        self.env["CODEX_WORKER_DEFAULT_DIR"] = str(missing_dir)
+        res_missing = self.run_cli_in("codex-worker", self.target, "--read-only", "Reply OK")
+        self.assertEqual(res_missing.returncode, 2)
+        self.assertIn("CODEX_WORKER_DEFAULT_DIR", res_missing.stderr)
+
+        not_a_dir = self.base / "not-a-dir.txt"
+        not_a_dir.write_text("file")
+        self.env["CODEX_WORKER_DEFAULT_DIR"] = str(not_a_dir)
+        res_file = self.run_cli_in("codex-worker", self.target, "--read-only", "Reply OK")
+        self.assertEqual(res_file.returncode, 2)
+        self.assertIn("CODEX_WORKER_DEFAULT_DIR", res_file.stderr)
+
+        # 5. Explicit blank -C fails fast for both CLIs instead of silently resolving '.'.
+        self.env.pop("CODEX_WORKER_DEFAULT_DIR", None)
+        for name, args in (("codex-worker", ("-C", "  ", "Reply OK")), ("codex-review", ("-C", ""))):
+            res_empty = self.run_cli_in(name, self.target, *args)
+            self.assertEqual(res_empty.returncode, 2)
+            self.assertIn("-C/--cd", res_empty.stderr)
 
 
 if __name__ == "__main__":

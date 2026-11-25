@@ -23,6 +23,35 @@ REVEAL_ENV_MAP = {
 }
 
 
+def resolve_target_dir(
+    cd_arg: Optional[str],
+    default_env_var: Optional[str] = None,
+) -> Optional[Path]:
+    """Resolve and validate the target working directory for a Codex command."""
+    from_env = False
+    if cd_arg is not None:
+        if not cd_arg.strip():
+            print("Error: -C/--cd must name a non-empty directory path.", file=sys.stderr)
+            return None
+        raw_dir = cd_arg
+    elif default_env_var:
+        env_val = os.environ.get(default_env_var)
+        if env_val is not None and env_val.strip():
+            raw_dir = env_val.strip()
+            from_env = True
+        else:
+            raw_dir = "."
+    else:
+        raw_dir = "."
+
+    target_dir = Path(raw_dir).expanduser().resolve()
+    if not target_dir.is_dir():
+        source = f"{default_env_var} " if from_env else ""
+        print(f"Error: {source}working directory does not exist: {target_dir}", file=sys.stderr)
+        return None
+    return target_dir
+
+
 def resolve_codex(target_dir: Path) -> Optional[str]:
     override = os.environ.get("CODEX_BIN")
     if override is not None:

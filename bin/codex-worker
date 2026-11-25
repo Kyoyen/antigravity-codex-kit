@@ -29,6 +29,7 @@ from codex_runtime import (
     report_writer_lock_error,
     resolve_codex,
     resolve_reveal_mode,
+    resolve_target_dir,
     reveal_in_desktop_app,
 )
 
@@ -53,8 +54,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "-C",
         "--cd",
-        default=".",
-        help="Target working directory (default: current directory).",
+        default=None,
+        help="Target working directory (defaults to CODEX_WORKER_DEFAULT_DIR if set, otherwise '.').",
     )
     parser.add_argument(
         "-e",
@@ -508,9 +509,8 @@ def main() -> int:
         print("Error: task prompt is required (pass as argument or via stdin).", file=sys.stderr)
         return 2
 
-    target_dir = Path(args.cd).expanduser().resolve()
-    if not target_dir.is_dir():
-        print(f"Error: working directory does not exist: {target_dir}", file=sys.stderr)
+    target_dir = resolve_target_dir(args.cd, default_env_var="CODEX_WORKER_DEFAULT_DIR")
+    if target_dir is None:
         return 2
 
     codex_bin = resolve_codex(target_dir)
