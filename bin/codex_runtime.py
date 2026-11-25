@@ -101,6 +101,17 @@ class StderrTail:
             return self._tail.decode("utf-8", errors="replace")
 
 
+def report_writer_lock_error(*messages: str) -> None:
+    if not any("already has an active writer" in message.lower() for message in messages):
+        return
+    print(
+        "Hint: This session is currently locked by another Codex process (usually Codex Desktop "
+        "if the thread was opened there). Continue in Codex Desktop, start a new codex-worker "
+        "session without --resume, or restart Codex Desktop to release the lock.",
+        file=sys.stderr,
+    )
+
+
 def resolve_reveal_mode(reveal_flag: Optional[bool]) -> Optional[str]:
     if reveal_flag is True:
         return "always"
@@ -109,12 +120,12 @@ def resolve_reveal_mode(reveal_flag: Optional[bool]) -> Optional[str]:
 
     raw = os.environ.get("CODEX_WORKER_REVEAL")
     if raw is None or not raw.strip():
-        return "auto"
+        return "never"
     mapped = REVEAL_ENV_MAP.get(raw.strip().lower())
     if mapped is not None:
         return mapped
     print(
-        "Error: CODEX_WORKER_REVEAL must be one of auto, always, never (or 1/0/true/false).",
+        "Error: CODEX_WORKER_REVEAL must be one of never, auto, always (or 0/1/false/true).",
         file=sys.stderr,
     )
     return None

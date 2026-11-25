@@ -31,6 +31,11 @@ elif sys.argv[1] == "app-server":
             else:
                 tid = os.environ.get("STUB_THREAD_ID", "app-session")
                 print(json.dumps({"id": 2, "result": {"thread": {"id": tid}}}), flush=True)
+        if name == "thread/resume":
+            if os.environ.get("FAIL_WRITER_LOCK"):
+                print(json.dumps({"id": 2, "error": {"message": "thread 019a0000-0000-7000-8000-000000000001 already has an active writer"}}), flush=True)
+            else:
+                print(json.dumps({"id": 2, "result": {"thread": {"id": request["params"]["threadId"]}}}), flush=True)
         if name == "turn/start":
             print(json.dumps({"method": "item/completed", "params": {"item": {"type": "agentMessage", "text": "OK"}}}), flush=True)
             print(json.dumps({"method": "turn/completed", "params": {"turn": {"status": "completed"}}}), flush=True)
@@ -239,19 +244,36 @@ class CodexBinTest(unittest.TestCase):
             os.environ.clear()
             os.environ.update(old_env)
 
-        # 5. End-to-end CLI flag integration (--no-reveal vs --reveal) on darwin
+        # 5. End-to-end CLI flag integration (default=never, opt-in auto/--reveal) on darwin
         if sys.platform == "darwin":
             self.env.update(
                 CODEX_BIN=str(self.override),
                 STUB_THREAD_ID=valid_uuid,
                 OPEN_LOG=str(open_log),
-                FAKE_DESKTOP_STATE="front",
+                FAKE_DESKTOP_STATE="background",
                 PATH=str(fake_tools) + os.pathsep + self.env["PATH"],
             )
-            res_auto = self.run_cli("codex-worker", "--read-only", "Reply OK")
-            self.assertEqual(res_auto.returncode, 0, res_auto.stderr)
+            # Default must NOT open Desktop even when Desktop is in background (keeps --resume unlocked).
+            res_default = self.run_cli("codex-worker", "--read-only", "Reply OK")
+            self.assertEqual(res_default.returncode, 0, res_default.stderr)
             self.assertFalse(open_log.exists())
 
+            # Explicit CODEX_WORKER_REVEAL=auto reveals when Desktop is in background, skips in front.
+            self.env["CODEX_WORKER_REVEAL"] = "auto"
+            res_auto_bg = self.run_cli("codex-worker", "--read-only", "Reply OK")
+            self.assertEqual(res_auto_bg.returncode, 0, res_auto_bg.stderr)
+            self.assertEqual(
+                [json.loads(l) for l in open_log.read_text().splitlines()],
+                [["-g", "-b", "com.openai.codex", f"codex://threads/{valid_uuid}"]],
+            )
+            open_log.unlink()
+
+            self.env["FAKE_DESKTOP_STATE"] = "front"
+            res_auto_front = self.run_cli("codex-worker", "--read-only", "Reply OK")
+            self.assertEqual(res_auto_front.returncode, 0, res_auto_front.stderr)
+            self.assertFalse(open_log.exists())
+
+            # Explicit --reveal overrides default/front; --no-reveal overrides env.
             res_reveal = self.run_cli("codex-worker", "--read-only", "--reveal", "Reply OK")
             self.assertEqual(res_reveal.returncode, 0, res_reveal.stderr)
             self.assertEqual(
@@ -260,10 +282,20 @@ class CodexBinTest(unittest.TestCase):
             )
             open_log.unlink()
 
-            self.env["FAKE_DESKTOP_STATE"] = "background"
+            self.env.update(FAKE_DESKTOP_STATE="background", CODEX_WORKER_REVEAL="always")
             res_no = self.run_cli("codex-worker", "--read-only", "--no-reveal", "Reply OK")
             self.assertEqual(res_no.returncode, 0, res_no.stderr)
             self.assertFalse(open_log.exists())
+
+    def test_writer_lock_conflict_reports_actionable_hint(self):
+        self.env.update(CODEX_BIN=str(self.override), FAIL_WRITER_LOCK="1")
+        result = self.run_cli(
+            "codex-worker", "--read-only", "--resume", "019a0000-0000-7000-8000-000000000001", "Reply OK"
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("already has an active writer", result.stderr)
+        self.assertIn("Codex Desktop", result.stderr)
+        self.assertIn("--resume", result.stderr)
 
 
 if __name__ == "__main__":

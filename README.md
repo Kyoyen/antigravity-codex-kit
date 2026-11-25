@@ -87,6 +87,6 @@ codex-review --hard --base main -C /path/to/repo
 
 ## 说明
 
-- **在 Codex 桌面客户端中查看会话**：Codex 桌面端与外部 `codex-worker` 各自持有独立 `app-server` 进程，且同一会话受单写者锁保护，因此任务执行中途不会在已打开的桌面端窗口实时渲染流式输出。在 macOS 上，任务结束释放写锁后，若检测到桌面端已在后台运行，`codex-worker` 会自动通过 `open -g -b com.openai.codex codex://threads/<session_id>` 在后台刷新并定位到该会话（不抢焦点、桌面端未打开时不冷启动、桌面端处于前台激活状态时默认不打断当前对话）；也可用 `--reveal` / `--no-reveal` 或环境变量 `CODEX_WORKER_REVEAL=auto|always|never` 控制。
+- **在 Codex 桌面客户端中查看会话**：Codex 桌面端与外部 `codex-worker` 各自持有独立 `app-server` 进程，且同一会话受单写者文件锁（`thread-writer-locks`）保护。实测桌面端一旦通过 `codex://threads/<session_id>` 或手动点击加载某会话，会长期持有该会话写锁（切到其他会话也不会立即释放），导致后续 `codex-worker --resume <session_id>` 报 `already has an active writer`。因此 `codex-worker` **默认不自动在桌面端打开会话**（`CODEX_WORKER_REVEAL=never`），以保证连续 `--resume` 追改不受影响；确认任务收尾、需要直接交接给已运行的 macOS 桌面端查看或继续对话时，可显式加 `--reveal`（或设置 `CODEX_WORKER_REVEAL=auto|always`），在不抢焦点的前提下通过 `open -g -b com.openai.codex codex://threads/<session_id>` 后台刷出该会话。
 - **在终端接管会话**：可通过 `codex resume <session_id>` 在终端交互界面中查看完整过程或继续对话。
 - **Codex 配置解析失败**：如果旧版 CLI 不识别当前配置（例如 `web_search = "indexed"`），报错会显示实际调用的 CLI 路径和可取得的版本。默认沿用 `PATH`；可用 `CODEX_BIN="/absolute/path/to/codex" codex-worker --read-only -C /path/to/project "只回复 OK"` 为单次调用指定兼容的可执行文件。工作树模式与 `codex-review` 同样接受 `CODEX_BIN`；显式指定无效路径时不会回退到 `PATH`。无需为此更改现有 Codex 配置。
