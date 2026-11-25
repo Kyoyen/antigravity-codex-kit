@@ -29,7 +29,8 @@ elif sys.argv[1] == "app-server":
             if os.environ.get("FAIL_CONFIG"):
                 print(json.dumps({"id": 2, "error": {"message": "failed to load configuration: unknown variant indexed"}}), flush=True)
             else:
-                print(json.dumps({"id": 2, "result": {"thread": {"id": "app-session"}}}), flush=True)
+                tid = os.environ.get("STUB_THREAD_ID", "app-session")
+                print(json.dumps({"id": 2, "result": {"thread": {"id": tid}}}), flush=True)
         if name == "turn/start":
             print(json.dumps({"method": "item/completed", "params": {"item": {"type": "agentMessage", "text": "OK"}}}), flush=True)
             print(json.dumps({"method": "turn/completed", "params": {"turn": {"status": "completed"}}}), flush=True)
@@ -57,6 +58,7 @@ class CodexBinTest(unittest.TestCase):
         self.log = self.base / "calls.jsonl"
         self.env = os.environ.copy()
         self.env.pop("CODEX_BIN", None)
+        self.env.pop("CODEX_WORKER_REVEAL", None)
         self.env.update(
             PATH="relative-path" + os.pathsep + os.environ.get("PATH", os.defpath),
             CALL_LOG=str(self.log),
@@ -158,6 +160,110 @@ class CodexBinTest(unittest.TestCase):
         self.assertIn(str(self.override), result.stderr)
         self.assertIn("codex-cli 0.1.0", result.stderr)
         self.assertEqual(self.calls()[-1], [str(self.override), "--version"])
+
+    def test_invalid_reveal_env_is_rejected(self):
+        self.env.update(CODEX_BIN=str(self.override), CODEX_WORKER_REVEAL="bogus")
+        result = self.run_cli("codex-worker", "--read-only", "Reply OK")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("CODEX_WORKER_REVEAL", result.stderr)
+        self.assertFalse(self.log.exists())
+
+    def test_desktop_reveal_modes_and_focus_safety(self):
+        sys.path.insert(0, str(ROOT / "bin"))
+        from codex_runtime import reveal_in_desktop_app
+
+        open_log = self.base / "open_calls.jsonl"
+        fake_tools = self.base / "fake-macos-tools"
+        fake_tools.mkdir()
+
+        lsappinfo = fake_tools / "lsappinfo"
+        lsappinfo.write_text(
+            "#!" + sys.executable + "\n"
+            "import os\n"
+            "state = os.environ.get('FAKE_DESKTOP_STATE', 'stopped')\n"
+            "if state == 'background':\n"
+            "    print('[ NULL ]  ASN:0x0-0x1:\\n    bundleID=\"com.openai.codex\"')\n"
+            "elif state == 'front':\n"
+            "    print('[ NULL ]  ASN:0x0-0x1: (in front)\\n    bundleID=\"com.openai.codex\"')\n"
+        )
+        lsappinfo.chmod(0o755)
+
+        fake_open = fake_tools / "open"
+        fake_open.write_text(
+            "#!" + sys.executable + "\n"
+            "import json, os, sys\n"
+            "with open(os.environ['OPEN_LOG'], 'a') as f:\n"
+            "    print(json.dumps(sys.argv[1:]), file=f)\n"
+        )
+        fake_open.chmod(0o755)
+
+        valid_uuid = "019a0000-0000-7000-8000-000000000001"
+        old_env = os.environ.copy()
+        try:
+            os.environ["PATH"] = str(fake_tools) + os.pathsep + old_env.get("PATH", os.defpath)
+            os.environ["OPEN_LOG"] = str(open_log)
+
+            # 1. Stopped desktop app -> never cold-launch
+            os.environ["FAKE_DESKTOP_STATE"] = "stopped"
+            self.assertFalse(reveal_in_desktop_app(valid_uuid, "auto", platform="darwin"))
+            self.assertFalse(reveal_in_desktop_app(valid_uuid, "always", platform="darwin"))
+            self.assertFalse(open_log.exists())
+
+            # 2. Running in background -> auto reveals without stealing focus (-g)
+            os.environ["FAKE_DESKTOP_STATE"] = "background"
+            self.assertTrue(reveal_in_desktop_app(valid_uuid, "auto", platform="darwin"))
+            self.assertEqual(
+                [json.loads(l) for l in open_log.read_text().splitlines()],
+                [["-g", "-b", "com.openai.codex", f"codex://threads/{valid_uuid}"]],
+            )
+            open_log.unlink()
+
+            # 3. Running in front -> auto does not hijack active window, always does
+            os.environ["FAKE_DESKTOP_STATE"] = "front"
+            self.assertFalse(reveal_in_desktop_app(valid_uuid, "auto", platform="darwin"))
+            self.assertFalse(open_log.exists())
+            self.assertTrue(reveal_in_desktop_app(valid_uuid, "always", platform="darwin"))
+            self.assertEqual(
+                [json.loads(l) for l in open_log.read_text().splitlines()],
+                [["-g", "-b", "com.openai.codex", f"codex://threads/{valid_uuid}"]],
+            )
+            open_log.unlink()
+
+            # 4. Non-darwin / never / non-UUID -> no-op
+            os.environ["FAKE_DESKTOP_STATE"] = "background"
+            self.assertFalse(reveal_in_desktop_app(valid_uuid, "never", platform="darwin"))
+            self.assertFalse(reveal_in_desktop_app(valid_uuid, "auto", platform="linux"))
+            self.assertFalse(reveal_in_desktop_app("not-a-uuid", "always", platform="darwin"))
+            self.assertFalse(open_log.exists())
+        finally:
+            os.environ.clear()
+            os.environ.update(old_env)
+
+        # 5. End-to-end CLI flag integration (--no-reveal vs --reveal) on darwin
+        if sys.platform == "darwin":
+            self.env.update(
+                CODEX_BIN=str(self.override),
+                STUB_THREAD_ID=valid_uuid,
+                OPEN_LOG=str(open_log),
+                FAKE_DESKTOP_STATE="front",
+                PATH=str(fake_tools) + os.pathsep + self.env["PATH"],
+            )
+            res_auto = self.run_cli("codex-worker", "--read-only", "Reply OK")
+            self.assertEqual(res_auto.returncode, 0, res_auto.stderr)
+            self.assertFalse(open_log.exists())
+
+            res_reveal = self.run_cli("codex-worker", "--read-only", "--reveal", "Reply OK")
+            self.assertEqual(res_reveal.returncode, 0, res_reveal.stderr)
+            self.assertEqual(
+                [json.loads(l) for l in open_log.read_text().splitlines()],
+                [["-g", "-b", "com.openai.codex", f"codex://threads/{valid_uuid}"]],
+            )
+            open_log.unlink()
+
+            self.env["FAKE_DESKTOP_STATE"] = "background"
+            res_no = self.run_cli("codex-worker", "--read-only", "--no-reveal", "Reply OK")
+            self.assertEqual(res_no.returncode, 0, res_no.stderr)
+            self.assertFalse(open_log.exists())
 
 
 if __name__ == "__main__":

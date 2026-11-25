@@ -5,8 +5,22 @@ import shutil
 import subprocess
 import sys
 import threading
+import uuid
 from pathlib import Path
 from typing import Optional, TextIO
+
+DESKTOP_BUNDLE_ID = "com.openai.codex"
+REVEAL_ENV_MAP = {
+    "auto": "auto",
+    "always": "always",
+    "1": "always",
+    "true": "always",
+    "yes": "always",
+    "never": "never",
+    "0": "never",
+    "false": "never",
+    "no": "never",
+}
 
 
 def resolve_codex(target_dir: Path) -> Optional[str]:
@@ -85,3 +99,76 @@ class StderrTail:
         self._reader.join(timeout=2)
         with self._lock:
             return self._tail.decode("utf-8", errors="replace")
+
+
+def resolve_reveal_mode(reveal_flag: Optional[bool]) -> Optional[str]:
+    if reveal_flag is True:
+        return "always"
+    if reveal_flag is False:
+        return "never"
+
+    raw = os.environ.get("CODEX_WORKER_REVEAL")
+    if raw is None or not raw.strip():
+        return "auto"
+    mapped = REVEAL_ENV_MAP.get(raw.strip().lower())
+    if mapped is not None:
+        return mapped
+    print(
+        "Error: CODEX_WORKER_REVEAL must be one of auto, always, never (or 1/0/true/false).",
+        file=sys.stderr,
+    )
+    return None
+
+
+def reveal_in_desktop_app(thread_id: Optional[str], mode: str, platform: Optional[str] = None) -> bool:
+    """Refresh an already-running macOS Codex Desktop window via official deep link.
+
+    Must be called only after the worker's app-server process has exited so the
+    per-thread writer lock has been released. Never cold-launches Codex Desktop,
+    never steals window focus (`open -g`), and in `auto` mode avoids switching
+    away from an actively focused Codex Desktop window.
+    """
+    if mode == "never" or not thread_id:
+        return False
+    if (platform or sys.platform) != "darwin":
+        return False
+
+    try:
+        canonical_id = str(uuid.UUID(thread_id))
+    except ValueError:
+        return False
+
+    lsappinfo_bin = shutil.which("lsappinfo")
+    open_bin = shutil.which("open")
+    if not lsappinfo_bin or not open_bin:
+        return False
+
+    try:
+        info = subprocess.run(
+            [lsappinfo_bin, "info", "-only", "bundleid", "-app", DESKTOP_BUNDLE_ID],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+    output = info.stdout or ""
+    if f'bundleID="{DESKTOP_BUNDLE_ID}"' not in output:
+        return False
+    if mode == "auto" and "(in front)" in output:
+        return False
+
+    try:
+        proc = subprocess.run(
+            [open_bin, "-g", "-b", DESKTOP_BUNDLE_ID, f"codex://threads/{canonical_id}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+        )
+        return proc.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False

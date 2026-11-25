@@ -21,7 +21,14 @@ import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
-from codex_runtime import StderrTail, report_config_error, report_launch_error, resolve_codex
+from codex_runtime import (
+    StderrTail,
+    report_config_error,
+    report_launch_error,
+    resolve_codex,
+    resolve_reveal_mode,
+    reveal_in_desktop_app,
+)
 
 ALLOWED_EFFORTS = ("low", "medium", "high")
 
@@ -86,6 +93,22 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print raw JSON/JSON-RPC event stream from Codex.",
     )
+    reveal_group = parser.add_mutually_exclusive_group()
+    reveal_group.add_argument(
+        "--reveal",
+        dest="reveal",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Reveal the session in an already-running Codex Desktop app upon completion.",
+    )
+    reveal_group.add_argument(
+        "--no-reveal",
+        dest="reveal",
+        action="store_const",
+        const=False,
+        help="Do not automatically reveal the session in Codex Desktop.",
+    )
     parser.add_argument(
         "prompt",
         nargs="*",
@@ -128,6 +151,7 @@ def run_via_app_server(
     resume_id: Optional[str],
     prompt: str,
     raw: bool,
+    reveal_mode: str = "auto",
 ) -> int:
     """Run via `codex app-server --stdio` so threads appear in Codex Desktop App."""
     try:
@@ -292,6 +316,9 @@ def run_via_app_server(
             proc.wait()
 
     stderr_output = stderr_tail.finish()
+
+    if exit_code == 0:
+        reveal_in_desktop_app(thread_id, reveal_mode)
 
     if not raw:
         if agent_messages:
@@ -470,6 +497,10 @@ def main() -> int:
     if codex_bin is None:
         return 2
 
+    reveal_mode = resolve_reveal_mode(args.reveal)
+    if reveal_mode is None:
+        return 2
+
     effort = "high" if args.hard else args.effort
     sandbox = "read-only" if args.read_only else "workspace-write"
 
@@ -495,6 +526,7 @@ def main() -> int:
         resume_id=args.resume,
         prompt=prompt,
         raw=args.raw,
+        reveal_mode=reveal_mode,
     )
 
 
