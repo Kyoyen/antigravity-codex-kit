@@ -11,9 +11,13 @@ Defaults:
 import argparse
 import subprocess
 import sys
-from pathlib import Path
 
-from codex_runtime import report_config_error, report_launch_error, resolve_codex
+from codex_runtime import (
+    report_config_error,
+    report_launch_error,
+    resolve_codex,
+    resolve_target_dir,
+)
 
 ALLOWED_EFFORTS = ("low", "medium", "high")
 
@@ -79,9 +83,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    target_dir = Path(args.cd).expanduser().resolve()
-    if not target_dir.is_dir():
-        print(f"Error: working directory does not exist: {target_dir}", file=sys.stderr)
+    target_dir = resolve_target_dir(args.cd)
+    if target_dir is None:
         return 2
 
     codex_bin = resolve_codex(target_dir)

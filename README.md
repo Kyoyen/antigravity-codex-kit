@@ -91,5 +91,6 @@ codex-review --hard --base main -C /path/to/repo
 ## 说明
 
 - **在 Codex 桌面客户端中查看会话**：Codex 桌面端与外部 `codex-worker` 各自持有独立 `app-server` 进程，且同一会话受单写者文件锁（`thread-writer-locks`）保护。实测桌面端一旦通过 `codex://threads/<session_id>` 或手动点击加载某会话，会长期持有该会话写锁（切到其他会话也不会立即释放），导致后续 `codex-worker --resume <session_id>` 报 `already has an active writer`。因此 `codex-worker` **默认不自动在桌面端打开会话**（`CODEX_WORKER_REVEAL=never`），以保证连续 `--resume` 追改不受影响；确认任务收尾、需要直接交接给已运行的 macOS 桌面端查看或继续对话时，可显式加 `--reveal`（或设置 `CODEX_WORKER_REVEAL=auto|always`），在不抢焦点的前提下通过 `open -g -b com.openai.codex codex://threads/<session_id>` 后台刷出该会话。
+- **统一默认项目目录（`CODEX_WORKER_DEFAULT_DIR`）**：`codex-worker` 传给 `-C` 的目录决定了会话在 Codex 桌面端侧边栏归属的项目。对于有明确仓库的任务，建议始终传入项目根目录；对于无明确已有项目的零散日常任务，可配置 `CODEX_WORKER_DEFAULT_DIR=/path/to/default-inbox` 统一收容未显式传 `-C` 的调用，避免桌面端侧边栏散落临时目录或杂项目录。显式传入 `-C` 时始终覆盖该环境变量；`codex-review` 针对具体仓库评审，不受该环境变量影响。
 - **在终端接管会话**：可通过 `codex resume <session_id>` 在终端交互界面中查看完整过程或继续对话。
 - **Codex 配置解析失败**：如果旧版 CLI 不识别当前配置（例如 `web_search = "indexed"`），报错会显示实际调用的 CLI 路径和可取得的版本。默认沿用 `PATH`；可用 `CODEX_BIN="/absolute/path/to/codex" codex-worker --read-only -C /path/to/project "只回复 OK"` 为单次调用指定兼容的可执行文件。工作树模式与 `codex-review` 同样接受 `CODEX_BIN`；显式指定无效路径时不会回退到 `PATH`。无需为此更改现有 Codex 配置。
