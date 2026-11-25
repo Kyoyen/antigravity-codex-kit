@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from codex_runtime import report_config_error, report_launch_error, resolve_codex
+
 ALLOWED_EFFORTS = ("low", "medium", "high")
 
 DEFAULT_REVIEW_PROMPT = """请审查上述代码变更，用简洁中文输出，严格分为两部分：
@@ -82,8 +84,12 @@ def main() -> int:
         print(f"Error: working directory does not exist: {target_dir}", file=sys.stderr)
         return 2
 
+    codex_bin = resolve_codex(target_dir)
+    if codex_bin is None:
+        return 2
+
     effort = "high" if args.hard else args.effort
-    cmd: list[str] = ["codex", "review", "-c", f'model_reasoning_effort="{effort}"']
+    cmd: list[str] = [codex_bin, "review", "-c", f'model_reasoning_effort="{effort}"']
 
     if args.model:
         cmd.extend(["-c", f'model="{args.model}"'])
@@ -104,24 +110,32 @@ def main() -> int:
         prompt = DEFAULT_REVIEW_PROMPT
 
     # First check if we pass prompt only when no scope conflict, or pass via codex review
-    proc = subprocess.run(
-        cmd + [prompt],
-        cwd=str(target_dir),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    # Some Codex CLI versions disallow combining --uncommitted/--base/--commit with [PROMPT].
-    # If that happens, transparently retry without the custom prompt so it still works cleanly.
-    if proc.returncode != 0 and "cannot be used with" in (proc.stderr or ""):
+    try:
         proc = subprocess.run(
-            cmd,
+            cmd + [prompt],
             cwd=str(target_dir),
             capture_output=True,
             text=True,
             check=False,
         )
+    except OSError as exc:
+        report_launch_error(codex_bin, exc)
+        return 2
+
+    # Some Codex CLI versions disallow combining --uncommitted/--base/--commit with [PROMPT].
+    # If that happens, transparently retry without the custom prompt so it still works cleanly.
+    if proc.returncode != 0 and "cannot be used with" in (proc.stderr or ""):
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(target_dir),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            report_launch_error(codex_bin, exc)
+            return 2
 
     if proc.stdout:
         print(proc.stdout.strip())
@@ -132,6 +146,9 @@ def main() -> int:
         ]
         if filtered and proc.returncode != 0:
             print("\n".join(filtered), file=sys.stderr)
+
+    if proc.returncode != 0:
+        report_config_error(codex_bin, proc.stderr or "")
 
     status = "ok" if proc.returncode == 0 else f"failed({proc.returncode})"
     print("\n---")
