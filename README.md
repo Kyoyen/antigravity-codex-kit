@@ -91,6 +91,7 @@ codex-review --hard --base main -C /path/to/repo
 
 ## 说明
 
+- **任务标识与回执**：`codex-worker` 和 `codex-review` 在状态行输出 `task_id`，省略 `--task-id <ID>` 时自动生成。派工、`--resume` 返工和审查可传同一 ID 来关联任务，续接会话仍使用 `session_id`。回执默认关闭，可用 `--receipt-log ~/.codex/receipts.jsonl` 或环境变量 `CODEX_KIT_RECEIPT_LOG` 启用（建议放在目标仓库外，避免被未提交审查或 `git add` 卷入），命令行参数优先，相对路径以调用命令时的目录为准。每次任务成功或失败追加一条 JSONL（新建文件权限为 `0600`），包含状态、退出码、耗时和一行输出摘要，`--reveal-only` 跳过写入。
 - **在 Codex 桌面客户端中查看会话**：Codex 桌面端与外部 `codex-worker` 各自持有独立 `app-server` 进程，且同一会话受单写者文件锁（`thread-writer-locks`）保护。实测桌面端一旦通过 `codex://threads/<session_id>` 或手动点击加载某会话，会长期持有该会话写锁（切到其他会话也不会立即释放），导致后续 `codex-worker --resume <session_id>` 报 `already has an active writer`。因此 `codex-worker` **默认不自动在桌面端打开会话**（`CODEX_WORKER_REVEAL=never`），以保证连续 `--resume` 追改不受影响；确认任务收尾、需要直接交接给已运行的 macOS 桌面端查看或继续对话时，可显式加 `--reveal`（或设置 `CODEX_WORKER_REVEAL=auto|always`），在不抢焦点的前提下通过 `open -g -b com.openai.codex codex://threads/<session_id>` 后台刷出该会话。
 - **统一默认项目目录（`CODEX_WORKER_DEFAULT_DIR`）**：`codex-worker` 传给 `-C` 的目录决定了会话在 Codex 桌面端侧边栏归属的项目。对于有明确仓库的任务，建议始终传入项目根目录；对于无明确已有项目的零散日常任务，可配置 `CODEX_WORKER_DEFAULT_DIR=/path/to/default-inbox` 统一收容未显式传 `-C` 的调用，避免桌面端侧边栏散落临时目录或杂项目录。显式传入 `-C` 时始终覆盖该环境变量；`codex-review` 针对具体仓库评审，不受该环境变量影响。
 - **在终端接管会话**：可通过 `codex resume <session_id>` 在终端交互界面中查看完整过程或继续对话。

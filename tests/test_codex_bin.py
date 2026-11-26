@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,12 +41,18 @@ elif sys.argv[1] == "app-server":
             else:
                 print(json.dumps({"id": 2, "result": {"thread": {"id": request["params"]["threadId"]}}}), flush=True)
         if name == "turn/start":
-            print(json.dumps({"method": "item/completed", "params": {"item": {"type": "agentMessage", "text": "OK"}}}), flush=True)
+            reply = os.environ.get("STUB_REPLY", "OK")
+            print(json.dumps({"method": "item/completed", "params": {"item": {"type": "agentMessage", "text": reply}}}), flush=True)
             print(json.dumps({"method": "turn/completed", "params": {"turn": {"status": "completed"}}}), flush=True)
 elif sys.argv[1] == "exec":
     print(json.dumps({"type": "thread.started", "thread_id": "exec-session"}))
+    with open(sys.argv[sys.argv.index("-o") + 1], "w") as output:
+        output.write("exec OK\nsecond line")
 elif sys.argv[1] == "review":
-    if len(sys.argv) > 5:
+    if os.environ.get("FAIL_REVIEW"):
+        print("review failed", file=sys.stderr)
+        sys.exit(7)
+    if sys.argv[-1].startswith("请审查"):
         print("prompt cannot be used with --uncommitted", file=sys.stderr)
         sys.exit(2)
     print("review retry OK")
@@ -68,6 +75,7 @@ class CodexBinTest(unittest.TestCase):
         self.env.pop("CODEX_BIN", None)
         self.env.pop("CODEX_WORKER_REVEAL", None)
         self.env.pop("CODEX_WORKER_DEFAULT_DIR", None)
+        self.env.pop("CODEX_KIT_RECEIPT_LOG", None)
         self.env.update(
             PATH="relative-path" + os.pathsep + os.environ.get("PATH", os.defpath),
             CALL_LOG=str(self.log),
@@ -100,6 +108,194 @@ class CodexBinTest(unittest.TestCase):
 
     def calls(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+    def receipts(self, path):
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    def test_receipts_default_off_and_task_id_footer(self):
+        self.env["CODEX_BIN"] = str(self.override)
+        before = set(self.base.rglob("*"))
+        for env_value in (None, ""):
+            if env_value is not None:
+                self.env["CODEX_KIT_RECEIPT_LOG"] = env_value
+            worker = self.run_cli_in("codex-worker", self.base, "--read-only", "Reply OK")
+            review = self.run_cli_in("codex-review", self.base)
+            for result in (worker, review):
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertRegex(result.stdout, r"(?m)status=ok .* task_id=t-[0-9a-f]{8}$")
+            self.assertEqual(worker.stdout.splitlines()[-1], "[codex-worker] session_id=app-session")
+        self.assertEqual(set(self.base.rglob("*")) - before, {self.log})
+
+    def test_receipts_append_across_worker_resume_review_with_cli_priority(self):
+        env_log = self.base / "receipts" / "env.jsonl"
+        cli_log = self.base / "other" / "cli.jsonl"
+        task_id = "feature-42"
+        self.env.update(
+            CODEX_KIT_RECEIPT_LOG=str(env_log), STUB_REPLY="好" * 250 + "\nsecond line",
+        )
+        cases = (
+            ("codex-worker", ("--read-only", "Reply OK")),
+            ("codex-worker", ("--read-only", "--hard", "--resume", "app-session", "Follow up")),
+            ("codex-review", ()),
+            ("codex-review", ("--base", "main", "--receipt-log", str(cli_log))),
+        )
+        for name, args in cases:
+            result = self.run_cli(name, "--task-id", task_id, *args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f" task_id={task_id}\n", result.stdout)
+
+        initial, resumed, review = self.receipts(env_log)
+        (explicit,) = self.receipts(cli_log)
+        for row in (initial, resumed, review, explicit):
+            self.assertEqual(set(row), {
+                "ts", "tool", "task_id", "session_id", "resume_from", "cwd", "effort",
+                "sandbox", "model", "worktree", "scope", "status", "exit_code",
+                "duration_ms", "summary",
+            })
+            self.assertEqual(row["task_id"], task_id)
+            self.assertEqual(row["cwd"], str(self.target))
+            self.assertEqual(row["status"], "ok")
+            self.assertEqual(row["exit_code"], 0)
+            self.assertIsInstance(row["duration_ms"], int)
+            self.assertGreaterEqual(row["duration_ms"], 0)
+            self.assertEqual(datetime.fromisoformat(row["ts"]).utcoffset(), timedelta(0))
+        self.assertEqual(initial["tool"], "codex-worker")
+        self.assertEqual(initial["sandbox"], "read-only")
+        self.assertEqual(initial["summary"], "好" * 240)
+        self.assertIsNone(initial["resume_from"])
+        self.assertEqual(initial["session_id"], "app-session")
+        self.assertEqual(resumed["session_id"], initial["session_id"])
+        self.assertEqual(resumed["resume_from"], initial["session_id"])
+        self.assertEqual(resumed["effort"], "high")
+        self.assertEqual(review["tool"], "codex-review")
+        self.assertEqual(review["scope"], "uncommitted")
+        self.assertIsNone(review["session_id"])
+        self.assertEqual(review["summary"], "review retry OK")
+        self.assertEqual(explicit["scope"], "base:main")
+
+    def test_failed_task_receipts_and_unwritable_log(self):
+        receipt_log = self.base / "failures.jsonl"
+        self.env.update(
+            CODEX_KIT_RECEIPT_LOG=str(receipt_log), FAIL_WRITER_LOCK="1", FAIL_REVIEW="1",
+        )
+        worker = self.run_cli("codex-worker", "--raw", "--read-only", "--resume", "app-session", "Retry")
+        self.assertEqual(worker.returncode, 1, worker.stderr)
+        self.assertNotIn("[codex-worker]", worker.stdout)
+        review = self.run_cli("codex-review")
+        self.assertEqual(review.returncode, 7, review.stderr)
+        worker_row, review_row = self.receipts(receipt_log)
+        self.assertEqual(worker_row["exit_code"], 1)
+        self.assertEqual(worker_row["resume_from"], "app-session")
+        self.assertEqual(worker_row["status"], "failed(failed)")
+        self.assertIn("already has an active writer", worker_row["summary"])
+        self.assertEqual(review_row["exit_code"], 7)
+        self.assertEqual(review_row["status"], "failed(7)")
+        self.assertEqual(review_row["summary"], "review failed")
+
+        failed_write = self.run_cli("codex-review", "--receipt-log", str(receipt_log / "nested"))
+        self.assertEqual(failed_write.returncode, 7)
+        self.assertIn("Warning: could not append task receipt", failed_write.stderr)
+
+    def test_invalid_receipt_path_and_reveal_only(self):
+        env_log = self.base / "env.jsonl"
+        self.env["CODEX_KIT_RECEIPT_LOG"] = str(env_log)
+        session_id = "019a0000-0000-7000-8000-000000000009"
+        for name, args in (
+            ("codex-worker", ("Reply OK",)),
+            ("codex-worker", ("--reveal-only", session_id)),
+            ("codex-review", ()),
+        ):
+            for path in ("", "  ", str(self.base)):
+                with self.subTest(name=name, args=args, path=path):
+                    result = self.run_cli(name, "--receipt-log", path, *args)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("--receipt-log", result.stderr)
+        self.assertFalse(self.log.exists())
+        self.assertFalse(env_log.exists())
+
+        self.env["CODEX_KIT_RECEIPT_LOG"] = str(self.base)
+        invalid_env = self.run_cli("codex-review")
+        self.assertEqual(invalid_env.returncode, 2)
+        self.assertIn("CODEX_KIT_RECEIPT_LOG", invalid_env.stderr)
+        self.assertFalse(self.log.exists())
+
+        self.env["CODEX_KIT_RECEIPT_LOG"] = str(env_log)
+        # Keep this test independent of real Desktop state.
+        lsappinfo = self.commands / "lsappinfo"
+        lsappinfo.write_text("#!/bin/sh\nexit 0\n")
+        lsappinfo.chmod(0o755)
+        self.env["PATH"] = str(self.commands) + os.pathsep + self.env["PATH"]
+        result = self.run_cli("codex-worker", "--reveal-only", session_id)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.log.exists())
+        self.assertFalse(env_log.exists())
+
+    def test_raw_worktree_receipt_keeps_session_and_final_message(self):
+        receipt_log = self.base / "worktree.jsonl"
+        result = self.run_cli(
+            "codex-worker", "--worktree", "--raw", "--read-only",
+            "--receipt-log", str(receipt_log), "Reply OK",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["thread_id"], "exec-session")
+        (row,) = self.receipts(receipt_log)
+        self.assertTrue(row["worktree"])
+        self.assertEqual(row["session_id"], "exec-session")
+        self.assertEqual(row["summary"], "exec OK")
+
+    def test_receipt_permissions_prelaunch_failures_and_fifo_safety(self):
+        # 1. Created receipt file uses 0600 permissions; blank env acts as unset; blank --task-id fails.
+        receipt_log = self.base / "private.jsonl"
+        ok = self.run_cli(
+            "codex-worker", "--read-only", "--task-id", "perm-check",
+            "--receipt-log", str(receipt_log), "Reply OK",
+        )
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        if os.name == "posix":
+            self.assertEqual(receipt_log.stat().st_mode & 0o777, 0o600)
+
+        self.env["CODEX_KIT_RECEIPT_LOG"] = "   "
+        blank_env = self.run_cli("codex-review")
+        self.assertEqual(blank_env.returncode, 0, blank_env.stderr)
+        self.env.pop("CODEX_KIT_RECEIPT_LOG", None)
+
+        blank_tid = self.run_cli("codex-worker", "--read-only", "--task-id", "  ", "Reply OK")
+        self.assertEqual(blank_tid.returncode, 2)
+        self.assertIn("--task-id", blank_tid.stderr)
+
+        # 2. Pre-launch failures (missing CODEX_BIN / missing -C dir) still record receipts when enabled.
+        prelaunch_log = self.base / "prelaunch.jsonl"
+        self.env["CODEX_KIT_RECEIPT_LOG"] = str(prelaunch_log)
+        self.env["CODEX_BIN"] = str(self.base / "no-such-codex")
+        w_missing_bin = self.run_cli("codex-worker", "--task-id", "pre-1", "Reply OK")
+        r_missing_bin = self.run_cli("codex-review", "--task-id", "pre-2")
+        self.assertEqual(w_missing_bin.returncode, 2)
+        self.assertEqual(r_missing_bin.returncode, 2)
+
+        self.env["CODEX_BIN"] = str(self.override)
+        missing_dir = self.base / "no-such-dir"
+        w_missing_dir = self.run_cli_in("codex-worker", self.target, "-C", str(missing_dir), "--task-id", "pre-3", "Reply OK")
+        self.assertEqual(w_missing_dir.returncode, 2)
+
+        rows = self.receipts(prelaunch_log)
+        self.assertEqual([(r["tool"], r["task_id"], r["exit_code"]) for r in rows], [
+            ("codex-worker", "pre-1", 2),
+            ("codex-review", "pre-2", 2),
+            ("codex-worker", "pre-3", 2),
+        ])
+
+        # 3. Named pipe (FIFO) is rejected immediately without blocking.
+        if hasattr(os, "mkfifo"):
+            fifo = self.base / "receipt.fifo"
+            os.mkfifo(fifo)
+            res_fifo = self.run_cli("codex-worker", "--read-only", "--receipt-log", str(fifo), "Reply OK")
+            self.assertEqual(res_fifo.returncode, 2)
+            self.assertIn("regular file", res_fifo.stderr)
+
+            sys.path.insert(0, str(ROOT / "bin"))
+            from codex_runtime import append_task_receipt
+            # Direct append to FIFO must warn and return immediately without hanging.
+            append_task_receipt(fifo, {"tool": "codex-worker", "task_id": "fifo-test", "summary": "noop"})
 
     def test_default_looks_up_path_from_target_directory(self):
         result = self.run_cli("codex-worker", "--read-only", "Reply OK")
@@ -141,6 +337,8 @@ class CodexBinTest(unittest.TestCase):
         invalid.write_text("not an executable")
         invalid.chmod(0o755)
         self.env["CODEX_BIN"] = str(invalid)
+        receipt_log = self.base / "launch-failures.jsonl"
+        self.env["CODEX_KIT_RECEIPT_LOG"] = str(receipt_log)
         for name, args in (
             ("codex-worker", ("Reply OK",)),
             ("codex-worker", ("--worktree", "Reply OK")),
@@ -152,6 +350,9 @@ class CodexBinTest(unittest.TestCase):
                 self.assertIn(str(invalid), result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
                 self.assertFalse(self.log.exists())
+        rows = self.receipts(receipt_log)
+        self.assertEqual([row["exit_code"] for row in rows], [2, 2, 2])
+        self.assertEqual([row["worktree"] for row in rows], [False, True, False])
 
     def test_app_server_drains_noisy_stderr_before_thread_response(self):
         self.env.update(CODEX_BIN=str(self.override), NOISY_APP_SERVER="1")
