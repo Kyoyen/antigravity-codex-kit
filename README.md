@@ -8,7 +8,8 @@
 
 - **职责分离**：在 Antigravity 中完成需求对齐、架构讨论和最终验收；将边界清晰的实现、重构、问题排查和 Code Review 交给本机 Codex 执行。
 - **可控的默认边界**：
-  - `codex-worker` 默认使用 `workspace-write` 沙箱，支持 `--read-only` 只读模式和 `--worktree` Git 隔离模式。
+  - `codex-worker` 默认使用 `workspace-write` 沙箱，支持 `--read-only` 只读模式、`--worktree` Git 隔离模式，以及仅在显式授权时按需开启的 `--allow-full`（对应 `danger-full-access`，用于本机 Chromium 渲染或 SSH 运维）。
+  - 写模式下默认注入执行者指令：在给定任务范围内直接实施并自测，无需二次请示；需要主控验收的临时产物统一放在当前工作区内（如 `.tmp/`），避免散落到 `/tmp`。
   - 推理强度默认 `medium`，复杂任务可通过 `--hard` 切换至 `high`（脚本层限制上限为 `high`）。
   - 模型默认继承 `~/.codex/config.toml`，也支持通过 `-m` 按任务覆盖。
 - **兼容 Codex 桌面客户端**：`codex-worker` 默认通过 `codex app-server --stdio` 协议发起与恢复会话，会话会绑定到对应的项目目录并以 `vscode` 来源记录，可在 Codex 桌面客户端中查看历史记录。

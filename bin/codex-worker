@@ -35,6 +35,18 @@ from codex_runtime import (
 
 ALLOWED_EFFORTS = ("low", "medium", "high")
 
+WRITE_MODE_INSTRUCTIONS = (
+    "你是主控在用户已明确授权后派发的执行者：在给定任务范围内请直接落地修改并完成自测，"
+    "不要因改动规模或常规重构停下来二次请示；仅在遇到超出任务范围的高风险操作或明确阻塞时才暂停询问。"
+    "所有需要主控查看或验收的临时产物（预览图、截图、日志、临时脚本等）统一放在当前工作区内"
+    "（例如 `.tmp/`，且不要提交进 git），不要放到 `/tmp`。"
+)
+
+READ_ONLY_INSTRUCTIONS = (
+    "所有需要主控查看或验收的临时产物（日志、分析文件等）请优先放在当前工作区内"
+    "（例如 `.tmp/`，且不要提交进 git），不要放到 `/tmp`。"
+)
+
 
 def is_git_repo(directory: Path) -> bool:
     result = subprocess.run(
@@ -75,10 +87,16 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional model override (defaults to ~/.codex/config.toml).",
     )
-    parser.add_argument(
+    sandbox_group = parser.add_mutually_exclusive_group()
+    sandbox_group.add_argument(
         "--read-only",
         action="store_true",
         help="Run Codex in read-only sandbox mode (no file edits).",
+    )
+    sandbox_group.add_argument(
+        "--allow-full",
+        action="store_true",
+        help="Run Codex in danger-full-access sandbox (only when explicitly authorized, e.g. for local Chromium or SSH).",
     )
     parser.add_argument(
         "--worktree",
@@ -191,6 +209,7 @@ def run_via_app_server(
     errors: list[str] = []
     turn_status = "failed"
     exit_code = 1
+    dev_instructions = READ_ONLY_INSTRUCTIONS if sandbox == "read-only" else WRITE_MODE_INSTRUCTIONS
 
     try:
         send({
@@ -236,6 +255,7 @@ def run_via_app_server(
                         "cwd": str(target_dir),
                         "sandbox": sandbox,
                         "approvalPolicy": "never",
+                        "developerInstructions": dev_instructions,
                     }
                     if model:
                         params["model"] = model
@@ -245,6 +265,7 @@ def run_via_app_server(
                         "cwd": str(target_dir),
                         "sandbox": sandbox,
                         "approvalPolicy": "never",
+                        "developerInstructions": dev_instructions,
                     }
                     if model:
                         params["model"] = model
@@ -265,6 +286,7 @@ def run_via_app_server(
                     "cwd": str(target_dir),
                     "sandbox": sandbox,
                     "approvalPolicy": "never",
+                    "developerInstructions": dev_instructions,
                 }
                 if model:
                     params["model"] = model
@@ -313,16 +335,24 @@ def run_via_app_server(
                 errors.append(str(err))
 
     finally:
+        if thread_id:
+            try:
+                send({"id": 4, "method": "thread/unsubscribe", "params": {"threadId": thread_id}})
+            except OSError:
+                pass
         try:
             proc.stdin.close()
         except OSError:
             pass
-        proc.terminate()
         try:
-            proc.wait(timeout=5)
+            proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
 
     stderr_output = stderr_tail.finish()
 
@@ -522,7 +552,12 @@ def main() -> int:
         return 2
 
     effort = "high" if args.hard else args.effort
-    sandbox = "read-only" if args.read_only else "workspace-write"
+    if args.read_only:
+        sandbox = "read-only"
+    elif args.allow_full:
+        sandbox = "danger-full-access"
+    else:
+        sandbox = "workspace-write"
 
     if args.worktree:
         return run_via_exec(

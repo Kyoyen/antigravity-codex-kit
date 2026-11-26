@@ -19,8 +19,11 @@ elif sys.argv[1] == "app-server":
         name = request["method"]
         if name == "initialize":
             print(json.dumps({"id": 1, "result": {}}), flush=True)
+        if os.environ.get("RPC_LOG"):
+            with open(os.environ["RPC_LOG"], "a") as rf:
+                print(json.dumps(request, ensure_ascii=False), file=rf)
         if name == "thread/start":
-            assert request["params"]["sandbox"] == "read-only"
+            assert request["params"]["sandbox"] == os.environ.get("EXPECT_SANDBOX", "read-only")
             assert request["params"]["cwd"] == os.getcwd()
             if os.environ.get("NOISY_APP_SERVER"):
                 sys.stderr.buffer.write(b"debug line\n" * 110000)
@@ -397,6 +400,31 @@ class CodexBinTest(unittest.TestCase):
             res_empty = self.run_cli_in(name, self.target, *args)
             self.assertEqual(res_empty.returncode, 2)
             self.assertIn("-C/--cd", res_empty.stderr)
+
+    def test_allow_full_developer_instructions_and_unsubscribe(self):
+        # --read-only and --allow-full are mutually exclusive
+        conflict = self.run_cli("codex-worker", "--read-only", "--allow-full", "Reply OK")
+        self.assertEqual(conflict.returncode, 2)
+
+        rpc_log = self.base / "rpc_calls.jsonl"
+        self.env.update(
+            CODEX_BIN=str(self.override),
+            EXPECT_SANDBOX="danger-full-access",
+            RPC_LOG=str(rpc_log),
+        )
+        res = self.run_cli("codex-worker", "--allow-full", "Reply OK")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("sandbox=danger-full-access", res.stdout)
+
+        requests = [json.loads(line) for line in rpc_log.read_text().splitlines()]
+        methods = [req["method"] for req in requests]
+        self.assertIn("thread/start", methods)
+        self.assertIn("thread/unsubscribe", methods)
+
+        start_req = next(req for req in requests if req["method"] == "thread/start")
+        dev_inst = start_req["params"].get("developerInstructions", "")
+        self.assertIn("二次请示", dev_inst)
+        self.assertIn(".tmp/", dev_inst)
 
 
 if __name__ == "__main__":

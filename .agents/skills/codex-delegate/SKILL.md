@@ -35,11 +35,15 @@ codex-worker --worktree -C <项目目录> "任务说明"
 # 只读分析，不改文件
 codex-worker --read-only -C <项目目录> "排查某个问题并给出结论"
 
+# 按需放开完整权限（仅在用户明确授权、且确实需要本机 Chrome/Chromium 或 SSH 运维时使用）
+codex-worker --allow-full -C <项目目录> "跑实机 Chromium 截图验收 / SSH 只读核查"
+
 # 不满意或需要追改：用上次输出末尾的 session_id 续聊
 codex-worker --resume <session_id> -C <项目目录> "补充修改要求"
 ```
 
-- 派活提示词写清**目标、涉及范围/接口约束、验收方式**即可，不必粘贴大段代码（Codex 会自己读仓库和 `AGENTS.md`）。
+- 派活提示词写清**目标、涉及范围/接口约束、验收方式**即可，不必粘贴大段代码（Codex 会自己读仓库和 `AGENTS.md`）。`codex-worker` 已默认注入执行者授权声明（给定范围内直接实施并自测，无需二次请示）以及临时产物放工作区（如 `.tmp/`，不丢 `/tmp`）的约定。
+- **权限边界**：默认严格使用 `workspace-write`；`--allow-full` 只有在用户明确同意、且任务确实依赖本机 Chromium 或联网/SSH 时才能加。
 - **项目目录 `-C` 选择规范**：`codex-worker` 默认通过 `app-server` 绑定并展示在 Codex 桌面端侧边栏，传给 `-C` 的路径直接决定会话归属哪个项目分组：
   - **有明确已有项目**：必须传入项目根目录（含 `.git`、项目 `AGENTS.md` 或 `README.md` 的顶层目录），避免传深层子目录，也不要把包含多个独立项目的汇总父目录当 `-C`。
   - **无明确已有项目**：统一收敛到用户约定的默认集中目录（或通过 `CODEX_WORKER_DEFAULT_DIR` 配置），不要把临时目录（如 `/tmp`）或杂项工作区直接传给持久化会话，避免桌面端侧边栏产生大量碎片项目。
@@ -60,6 +64,6 @@ codex-review --hard --base main -C <项目目录>
 ## 验收与汇报
 
 1. Codex 干完后，由你检查改动（`git diff` / 跑测试 / 必要时跑一轮 `codex-review`）。
-2. 有阻断问题直接 `--resume` 让它返工（返工期间不要传 `--reveal`，避免桌面端提前占住写锁）。
-3. 整轮任务全部验收通过、确认不再需要 `--resume` 后，执行一次 `codex-worker --reveal-only <session_id>`，在后台将本次会话同步到用户的 Codex 桌面端侧边栏（不抢焦点、桌面端未打开时自动跳过）。
+2. 有阻断问题直接 `--resume` 让它返工（**干活中途不要传 `--reveal` 或调 `--reveal-only`**，避免 Codex 桌面端提前打开占住写锁）。
+3. 整轮任务全部验收通过、确定这个会话不再需要 `--resume` 后，再执行一次 `codex-worker --reveal-only <session_id>`，在后台将本次会话同步到用户的 Codex 桌面端侧边栏（不抢焦点、桌面端未打开时自动跳过）。
 4. 最后用**简洁中文**向用户汇报改了什么、验证结果如何，不要把 Codex 的冗长原始日志直接甩给用户。
