@@ -15,21 +15,28 @@ Defaults:
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from codex_runtime import (
+    RECEIPT_LOG_ENV,
     StderrTail,
+    append_task_receipt,
+    receipt_log_requested,
     report_config_error,
     report_launch_error,
     report_writer_lock_error,
     resolve_codex,
+    resolve_receipt_log,
     resolve_reveal_mode,
     resolve_target_dir,
+    resolve_task_id,
     reveal_in_desktop_app,
 )
 
@@ -46,6 +53,13 @@ READ_ONLY_INSTRUCTIONS = (
     "所有需要主控查看或验收的临时产物（日志、分析文件等）请优先放在当前工作区内"
     "（例如 `.tmp/`，且不要提交进 git），不要放到 `/tmp`。"
 )
+
+
+class TaskResult(NamedTuple):
+    exit_code: int
+    status: str
+    session_id: Optional[str]
+    summary: str
 
 
 def is_git_repo(directory: Path) -> bool:
@@ -114,6 +128,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print raw JSON/JSON-RPC event stream from Codex.",
     )
+    parser.add_argument("--task-id", metavar="ID", help="Task ID shared across runs (default: generated).")
+    parser.add_argument("--receipt-log", metavar="PATH", help=f"Append JSONL receipts (overrides {RECEIPT_LOG_ENV}).")
     reveal_group = parser.add_mutually_exclusive_group()
     reveal_group.add_argument(
         "--reveal",
@@ -159,11 +175,19 @@ def read_prompt(prompt_parts: list[str]) -> str:
     return ""
 
 
-def print_footer(status: str, effort: str, sandbox: str, model: Optional[str], target_dir: Path, session_id: Optional[str]) -> None:
+def print_footer(
+    status: str,
+    effort: str,
+    sandbox: str,
+    model: Optional[str],
+    target_dir: Path,
+    session_id: Optional[str],
+    task_id: str,
+) -> None:
     print("\n---")
     print(
         f"[codex-worker] status={status} effort={effort} sandbox={sandbox} "
-        f"model={model or 'default'} cwd={target_dir}"
+        f"model={model or 'default'} cwd={target_dir} task_id={task_id}"
     )
     if session_id:
         print(f"[codex-worker] session_id={session_id}")
@@ -178,8 +202,9 @@ def run_via_app_server(
     resume_id: Optional[str],
     prompt: str,
     raw: bool,
+    task_id: str,
     reveal_mode: str = "never",
-) -> int:
+) -> TaskResult:
     """Run via `codex app-server --stdio` so threads appear in Codex Desktop App."""
     try:
         proc = subprocess.Popen(
@@ -193,7 +218,7 @@ def run_via_app_server(
         )
     except OSError as exc:
         report_launch_error(codex_bin, exc)
-        return 2
+        return TaskResult(2, "failed(2)", None, str(exc))
 
     assert proc.stdin is not None
     assert proc.stdout is not None
@@ -334,6 +359,8 @@ def run_via_app_server(
                 err = (msg.get("params") or {}).get("message") or stripped
                 errors.append(str(err))
 
+    except BrokenPipeError as exc:
+        errors.append(f"Codex app-server closed its input: {exc}")
     finally:
         if thread_id:
             try:
@@ -359,6 +386,7 @@ def run_via_app_server(
     if exit_code == 0:
         reveal_in_desktop_app(thread_id, reveal_mode)
 
+    status = "ok" if exit_code == 0 else f"failed({turn_status})"
     if not raw:
         if agent_messages:
             print(agent_messages[-1])
@@ -374,13 +402,13 @@ def run_via_app_server(
             if filtered:
                 print("\n".join(filtered), file=sys.stderr)
 
-        status = "ok" if exit_code == 0 else f"failed({turn_status})"
-        print_footer(status, effort, sandbox, model, target_dir, thread_id)
+        print_footer(status, effort, sandbox, model, target_dir, thread_id, task_id)
 
     if exit_code != 0:
         report_config_error(codex_bin, stderr_output, *errors)
         report_writer_lock_error(stderr_output, *errors)
-    return exit_code
+    summary = (errors[0] if errors else "") or (agent_messages[-1] if agent_messages else "")
+    return TaskResult(exit_code, status, thread_id, summary or stderr_output.strip())
 
 
 def run_via_exec(
@@ -389,19 +417,19 @@ def run_via_exec(
     effort: str,
     sandbox: str,
     model: Optional[str],
-    worktree: bool,
     resume_id: Optional[str],
     prompt: str,
     raw: bool,
-) -> int:
+    task_id: str,
+    capture_summary: bool,
+) -> TaskResult:
     """Fallback to `codex exec` (used for --worktree)."""
-    in_git = is_git_repo(target_dir)
-    if worktree and not in_git:
-        print(f"Error: --worktree requires a Git repository, but {target_dir} is not one.", file=sys.stderr)
-        return 2
-
-    with tempfile.NamedTemporaryFile(prefix="codex-worker-", suffix=".md", delete=False) as tmp:
-        last_msg_path = Path(tmp.name)
+    try:
+        with tempfile.NamedTemporaryFile(prefix="codex-worker-", suffix=".md", delete=False) as tmp:
+            last_msg_path = Path(tmp.name)
+    except OSError as exc:
+        print(f"Error: could not create Codex output file: {exc}", file=sys.stderr)
+        return TaskResult(1, "failed(1)", None, str(exc))
 
     try:
         cmd: list[str] = [codex_bin, "exec"]
@@ -412,10 +440,7 @@ def run_via_exec(
             cmd.extend(["-c", f'sandbox_mode="{sandbox}"'])
             if model:
                 cmd.extend(["-m", model])
-            if worktree:
-                cmd.append("--worktree")
-            if not in_git:
-                cmd.append("--skip-git-repo-check")
+            cmd.append("--worktree")
             cmd.extend(["--json", "-o", str(last_msg_path)])
             if resume_id.lower() == "last":
                 cmd.append("--last")
@@ -428,10 +453,7 @@ def run_via_exec(
             cmd.extend(["-c", f'model_reasoning_effort="{effort}"'])
             if model:
                 cmd.extend(["-m", model])
-            if worktree:
-                cmd.append("--worktree")
-            if not in_git:
-                cmd.append("--skip-git-repo-check")
+            cmd.append("--worktree")
             cmd.extend(["--json", "-o", str(last_msg_path)])
             cmd.append(prompt)
 
@@ -446,7 +468,7 @@ def run_via_exec(
             )
         except OSError as exc:
             report_launch_error(codex_bin, exc)
-            return 2
+            return TaskResult(2, "failed(2)", None, str(exc))
 
         session_id = resume_id if (resume_id and resume_id.lower() != "last") else None
         agent_messages: list[str] = []
@@ -486,13 +508,18 @@ def run_via_exec(
         stderr_output = proc.stderr.read() if proc.stderr else ""
         exit_code = proc.wait()
 
-        if not raw:
-            final_message = ""
+        final_message = ""
+        if not raw or capture_summary:
             if last_msg_path.exists():
-                final_message = last_msg_path.read_text(encoding="utf-8", errors="replace").strip()
+                try:
+                    final_message = last_msg_path.read_text(encoding="utf-8", errors="replace").strip()
+                except OSError:
+                    pass
             if not final_message and agent_messages:
                 final_message = agent_messages[-1]
 
+        status = "ok" if exit_code == 0 else f"failed({exit_code})"
+        if not raw:
             if final_message:
                 print(final_message)
             elif errors:
@@ -508,12 +535,12 @@ def run_via_exec(
                 if filtered:
                     print("\n".join(filtered), file=sys.stderr)
 
-            status = "ok" if exit_code == 0 else f"failed({exit_code})"
-            print_footer(status, effort, sandbox, model, target_dir, session_id)
+            print_footer(status, effort, sandbox, model, target_dir, session_id, task_id)
 
         if exit_code != 0:
             report_config_error(codex_bin, stderr_output, *errors)
-        return exit_code
+        summary = (errors[0] if errors else "") or final_message or stderr_output.strip()
+        return TaskResult(exit_code, status, session_id, summary)
     finally:
         try:
             last_msg_path.unlink(missing_ok=True)
@@ -523,6 +550,9 @@ def run_via_exec(
 
 def main() -> int:
     args = parse_args()
+    receipt_log = resolve_receipt_log(args.receipt_log)
+    if receipt_log is None and receipt_log_requested(args.receipt_log):
+        return 2
     if args.reveal_only:
         try:
             canonical_id = str(uuid.UUID(args.reveal_only))
@@ -534,23 +564,11 @@ def main() -> int:
         print(f"[codex-worker] reveal={state} session_id={canonical_id}")
         return 0
 
-    prompt = read_prompt(args.prompt)
-    if not prompt:
-        print("Error: task prompt is required (pass as argument or via stdin).", file=sys.stderr)
+    task_id = resolve_task_id(args.task_id)
+    if task_id is None:
         return 2
 
-    target_dir = resolve_target_dir(args.cd, default_env_var="CODEX_WORKER_DEFAULT_DIR")
-    if target_dir is None:
-        return 2
-
-    codex_bin = resolve_codex(target_dir)
-    if codex_bin is None:
-        return 2
-
-    reveal_mode = resolve_reveal_mode(args.reveal)
-    if reveal_mode is None:
-        return 2
-
+    started = time.monotonic()
     effort = "high" if args.hard else args.effort
     if args.read_only:
         sandbox = "read-only"
@@ -559,30 +577,92 @@ def main() -> int:
     else:
         sandbox = "workspace-write"
 
+    def record_prelaunch_failure(reason: str, cwd: Optional[Path] = None) -> int:
+        append_task_receipt(receipt_log, {
+            "tool": "codex-worker",
+            "task_id": task_id,
+            "session_id": None,
+            "resume_from": args.resume,
+            "cwd": str(cwd) if cwd is not None else (args.cd or os.environ.get("CODEX_WORKER_DEFAULT_DIR") or str(Path.cwd())),
+            "effort": effort,
+            "sandbox": sandbox,
+            "model": args.model,
+            "worktree": args.worktree,
+            "scope": None,
+            "status": "failed(2)",
+            "exit_code": 2,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+            "summary": reason,
+        })
+        return 2
+
+    prompt = read_prompt(args.prompt)
+    if not prompt:
+        msg = "Error: task prompt is required (pass as argument or via stdin)."
+        print(msg, file=sys.stderr)
+        return record_prelaunch_failure(msg)
+
+    target_dir = resolve_target_dir(args.cd, default_env_var="CODEX_WORKER_DEFAULT_DIR")
+    if target_dir is None:
+        return record_prelaunch_failure("target working directory validation failed")
+
+    codex_bin = resolve_codex(target_dir)
+    if codex_bin is None:
+        return record_prelaunch_failure("codex executable resolution failed", cwd=target_dir)
+
+    reveal_mode = resolve_reveal_mode(args.reveal)
+    if reveal_mode is None:
+        return record_prelaunch_failure("CODEX_WORKER_REVEAL validation failed", cwd=target_dir)
+
+    if args.worktree and not is_git_repo(target_dir):
+        msg = f"Error: --worktree requires a Git repository, but {target_dir} is not one."
+        print(msg, file=sys.stderr)
+        return record_prelaunch_failure(msg, cwd=target_dir)
+
     if args.worktree:
-        return run_via_exec(
+        result = run_via_exec(
             codex_bin=codex_bin,
             target_dir=target_dir,
             effort=effort,
             sandbox=sandbox,
             model=args.model,
-            worktree=True,
             resume_id=args.resume,
             prompt=prompt,
             raw=args.raw,
+            task_id=task_id,
+            capture_summary=receipt_log is not None,
+        )
+    else:
+        result = run_via_app_server(
+            codex_bin=codex_bin,
+            target_dir=target_dir,
+            effort=effort,
+            sandbox=sandbox,
+            model=args.model,
+            resume_id=args.resume,
+            prompt=prompt,
+            raw=args.raw,
+            task_id=task_id,
+            reveal_mode=reveal_mode,
         )
 
-    return run_via_app_server(
-        codex_bin=codex_bin,
-        target_dir=target_dir,
-        effort=effort,
-        sandbox=sandbox,
-        model=args.model,
-        resume_id=args.resume,
-        prompt=prompt,
-        raw=args.raw,
-        reveal_mode=reveal_mode,
-    )
+    append_task_receipt(receipt_log, {
+        "tool": "codex-worker",
+        "task_id": task_id,
+        "session_id": result.session_id,
+        "resume_from": args.resume,
+        "cwd": str(target_dir),
+        "effort": effort,
+        "sandbox": sandbox,
+        "model": args.model,
+        "worktree": args.worktree,
+        "scope": None,
+        "status": result.status,
+        "exit_code": result.exit_code,
+        "duration_ms": int((time.monotonic() - started) * 1000),
+        "summary": result.summary,
+    })
+    return result.exit_code
 
 
 if __name__ == "__main__":

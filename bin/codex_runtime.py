@@ -1,15 +1,19 @@
 """Resolve the Codex executable used by the toolkit's entry points."""
 
+import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import threading
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, TextIO
+from typing import Any, Optional, TextIO
 
 DESKTOP_BUNDLE_ID = "com.openai.codex"
+RECEIPT_LOG_ENV = "CODEX_KIT_RECEIPT_LOG"
 REVEAL_ENV_MAP = {
     "auto": "auto",
     "always": "always",
@@ -21,6 +25,90 @@ REVEAL_ENV_MAP = {
     "false": "never",
     "no": "never",
 }
+
+
+def resolve_task_id(task_id_arg: Optional[str]) -> Optional[str]:
+    """Return a validated task ID or generate a short default."""
+    if task_id_arg is None:
+        return f"t-{uuid.uuid4().hex[:8]}"
+    cleaned = task_id_arg.strip()
+    if not cleaned:
+        print("Error: --task-id must be non-empty.", file=sys.stderr)
+        return None
+    return cleaned
+
+
+def receipt_log_requested(receipt_arg: Optional[str]) -> bool:
+    """Return True when the caller explicitly configured a receipt log path."""
+    if receipt_arg is not None:
+        return True
+    env_val = os.environ.get(RECEIPT_LOG_ENV)
+    return bool(env_val is not None and env_val.strip())
+
+
+def resolve_receipt_log(receipt_arg: Optional[str]) -> Optional[Path]:
+    """Resolve an opt-in regular file path relative to the caller's working directory."""
+    if receipt_arg is not None:
+        source = "--receipt-log"
+        raw_path = receipt_arg
+    else:
+        source = RECEIPT_LOG_ENV
+        env_val = os.environ.get(RECEIPT_LOG_ENV)
+        if env_val is None or not env_val.strip():
+            return None
+        raw_path = env_val
+
+    if not raw_path.strip():
+        print(f"Error: {source} must name a non-empty file path.", file=sys.stderr)
+        return None
+
+    try:
+        path = Path(raw_path.strip()).expanduser().absolute()
+    except (KeyError, RuntimeError) as exc:
+        print(f"Error: invalid {source} path: {exc}", file=sys.stderr)
+        return None
+    try:
+        st = os.stat(path)
+        if not stat.S_ISREG(st.st_mode):
+            print(f"Error: {source} must name a regular file, not a directory or special file: {path}", file=sys.stderr)
+            return None
+    except FileNotFoundError:
+        pass
+    except OSError:
+        # Leave filesystem access failures to the best-effort append.
+        pass
+    return path
+
+
+def append_task_receipt(log_path: Optional[Path], record: dict[str, Any]) -> None:
+    """Append one UTF-8 JSONL record (0600 on create) without affecting the task result."""
+    if log_path is None:
+        return
+    fd: Optional[int] = None
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(log_path, flags, 0o600)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(f"refusing to write receipt to non-regular file: {log_path}")
+        summary = (record.get("summary") or "").splitlines()
+        row = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            **record,
+            "summary": summary[0][:240] if summary else "",
+        }
+        payload = json.dumps(row, ensure_ascii=False) + "\n"
+        with os.fdopen(fd, "a", encoding="utf-8") as stream:
+            fd = None
+            stream.write(payload)
+    except (OSError, TypeError, ValueError) as exc:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        print(f"Warning: could not append task receipt to {log_path}: {exc}", file=sys.stderr)
 
 
 def resolve_target_dir(

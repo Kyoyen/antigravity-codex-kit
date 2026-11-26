@@ -9,14 +9,23 @@ Defaults:
 """
 
 import argparse
+import os
 import subprocess
 import sys
+import time
+import uuid
+from typing import Optional
 
 from codex_runtime import (
+    RECEIPT_LOG_ENV,
+    append_task_receipt,
+    receipt_log_requested,
     report_config_error,
     report_launch_error,
     resolve_codex,
+    resolve_receipt_log,
     resolve_target_dir,
+    resolve_task_id,
 )
 
 ALLOWED_EFFORTS = ("low", "medium", "high")
@@ -73,6 +82,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional model override (defaults to ~/.codex/config.toml).",
     )
+    parser.add_argument("--task-id", metavar="ID", help="Task ID shared across runs (default: generated).")
+    parser.add_argument("--receipt-log", metavar="PATH", help=f"Append JSONL receipts (overrides {RECEIPT_LOG_ENV}).")
     parser.add_argument(
         "extra_prompt",
         nargs="*",
@@ -83,15 +94,50 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    receipt_log = resolve_receipt_log(args.receipt_log)
+    if receipt_log is None and receipt_log_requested(args.receipt_log):
+        return 2
+
+    task_id = resolve_task_id(args.task_id)
+    if task_id is None:
+        return 2
+
+    started = time.monotonic()
+    effort = "high" if args.hard else args.effort
+    if args.base:
+        scope = f"base:{args.base}"
+    elif args.commit:
+        scope = f"commit:{args.commit}"
+    else:
+        scope = "uncommitted"
+
+    def record_prelaunch_failure(reason: str, cwd: Optional[str] = None) -> int:
+        append_task_receipt(receipt_log, {
+            "tool": "codex-review",
+            "task_id": task_id,
+            "session_id": None,
+            "resume_from": None,
+            "cwd": cwd if cwd is not None else (args.cd or "."),
+            "effort": effort,
+            "sandbox": None,
+            "model": args.model,
+            "worktree": False,
+            "scope": scope,
+            "status": "failed(2)",
+            "exit_code": 2,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+            "summary": reason,
+        })
+        return 2
+
     target_dir = resolve_target_dir(args.cd)
     if target_dir is None:
-        return 2
+        return record_prelaunch_failure("target repository directory validation failed")
 
     codex_bin = resolve_codex(target_dir)
     if codex_bin is None:
-        return 2
+        return record_prelaunch_failure("codex executable resolution failed", cwd=str(target_dir))
 
-    effort = "high" if args.hard else args.effort
     cmd: list[str] = [codex_bin, "review", "-c", f'model_reasoning_effort="{effort}"']
 
     if args.model:
@@ -112,7 +158,6 @@ def main() -> int:
     else:
         prompt = DEFAULT_REVIEW_PROMPT
 
-    # First check if we pass prompt only when no scope conflict, or pass via codex review
     try:
         proc = subprocess.run(
             cmd + [prompt],
@@ -121,14 +166,8 @@ def main() -> int:
             text=True,
             check=False,
         )
-    except OSError as exc:
-        report_launch_error(codex_bin, exc)
-        return 2
-
-    # Some Codex CLI versions disallow combining --uncommitted/--base/--commit with [PROMPT].
-    # If that happens, transparently retry without the custom prompt so it still works cleanly.
-    if proc.returncode != 0 and "cannot be used with" in (proc.stderr or ""):
-        try:
+        # Some Codex versions disallow combining scope flags with a prompt.
+        if proc.returncode != 0 and "cannot be used with" in (proc.stderr or ""):
             proc = subprocess.run(
                 cmd,
                 cwd=str(target_dir),
@@ -136,27 +175,51 @@ def main() -> int:
                 text=True,
                 check=False,
             )
-        except OSError as exc:
-            report_launch_error(codex_bin, exc)
-            return 2
+    except OSError as exc:
+        report_launch_error(codex_bin, exc)
+        exit_code = 2
+        status = "failed(2)"
+        summary = str(exc)
+    else:
+        exit_code = proc.returncode
+        if proc.stdout:
+            print(proc.stdout.strip())
+        if proc.stderr:
+            filtered = [
+                l for l in proc.stderr.splitlines()
+                if "could not create PATH aliases" not in l
+            ]
+            if filtered and exit_code != 0:
+                print("\n".join(filtered), file=sys.stderr)
 
-    if proc.stdout:
-        print(proc.stdout.strip())
-    if proc.stderr:
-        filtered = [
-            l for l in proc.stderr.splitlines()
-            if "could not create PATH aliases" not in l
-        ]
-        if filtered and proc.returncode != 0:
-            print("\n".join(filtered), file=sys.stderr)
+        if exit_code != 0:
+            report_config_error(codex_bin, proc.stderr or "")
 
-    if proc.returncode != 0:
-        report_config_error(codex_bin, proc.stderr or "")
+        status = "ok" if exit_code == 0 else f"failed({exit_code})"
+        summary = (proc.stderr.strip() if exit_code != 0 else "") or proc.stdout.strip()
+        print("\n---")
+        print(
+            f"[codex-review] status={status} effort={effort} "
+            f"model={args.model or 'default'} cwd={target_dir} task_id={task_id}"
+        )
 
-    status = "ok" if proc.returncode == 0 else f"failed({proc.returncode})"
-    print("\n---")
-    print(f"[codex-review] status={status} effort={effort} model={args.model or 'default'} cwd={target_dir}")
-    return proc.returncode
+    append_task_receipt(receipt_log, {
+        "tool": "codex-review",
+        "task_id": task_id,
+        "session_id": None,
+        "resume_from": None,
+        "cwd": str(target_dir),
+        "effort": effort,
+        "sandbox": None,
+        "model": args.model,
+        "worktree": False,
+        "scope": scope,
+        "status": status,
+        "exit_code": exit_code,
+        "duration_ms": int((time.monotonic() - started) * 1000),
+        "summary": summary,
+    })
+    return exit_code
 
 
 if __name__ == "__main__":

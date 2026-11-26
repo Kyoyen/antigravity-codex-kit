@@ -42,7 +42,7 @@ codex-worker --allow-full -C <项目目录> "跑实机 Chromium 截图验收 / S
 codex-worker --resume <session_id> -C <项目目录> "补充修改要求"
 ```
 
-- 派活提示词写清**目标、涉及范围/接口约束、验收方式**即可，不必粘贴大段代码（Codex 会自己读仓库和 `AGENTS.md`）。`codex-worker` 已默认注入执行者授权声明（给定范围内直接实施并自测，无需二次请示）以及临时产物放工作区（如 `.tmp/`，不丢 `/tmp`）的约定。
+- `codex-worker` 已默认注入执行者授权声明（给定范围内直接实施并自测，无需二次请示）以及临时产物放工作区（如 `.tmp/`，不丢 `/tmp`）的约定。
 - **权限边界**：默认严格使用 `workspace-write`；`--allow-full` 只有在用户明确同意、且任务确实依赖本机 Chromium 或联网/SSH 时才能加。
 - **项目目录 `-C` 选择规范**：`codex-worker` 默认通过 `app-server` 绑定并展示在 Codex 桌面端侧边栏，传给 `-C` 的路径直接决定会话归属哪个项目分组：
   - **有明确已有项目**：必须传入项目根目录（含 `.git`、项目 `AGENTS.md` 或 `README.md` 的顶层目录），避免传深层子目录，也不要把包含多个独立项目的汇总父目录当 `-C`。
@@ -59,6 +59,21 @@ codex-review -C <项目目录>
 
 # 高风险改动（切到 high）或对比主分支
 codex-review --hard --base main -C <项目目录>
+```
+
+## 交接单
+
+1. **目标** — 要改什么或查什么，预期交付什么。
+2. **范围与现有未提交改动** — 允许操作的文件或模块，以及需要避开的已有改动。
+3. **硬约束** — 权限、接口兼容性和依赖要求。
+4. **验收命令与回报格式** — 给出具体命令，只回报改动清单、验证结果和残余风险。
+
+同一单沿用 `--task-id`。返工时另传上一轮输出的 `session_id` 以续接会话。配置仓库外的回执路径后，三次调用会追加到同一份 JSONL（避免进入 `codex-review --uncommitted` 或 `git add` 范围）。
+
+```bash
+codex-worker --task-id fix-validation --receipt-log ~/.codex/receipts.jsonl -C /path/to/repo "修复校验逻辑与约定范围内的测试"
+codex-worker --task-id fix-validation --receipt-log ~/.codex/receipts.jsonl -C /path/to/repo --resume "<session_id>" "补齐失败退出码验证"
+codex-review --task-id fix-validation --receipt-log ~/.codex/receipts.jsonl -C /path/to/repo
 ```
 
 ## 验收与汇报
